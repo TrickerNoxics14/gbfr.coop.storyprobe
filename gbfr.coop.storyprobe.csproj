@@ -1,0 +1,34 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>gbfr.coop.storyprobe</AssemblyName>
+    <RootNamespace>gbfr.coop.storyprobe</RootNamespace>
+    <EnableDynamicLoading>true</EnableDynamicLoading>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- Privacy: a default build writes the full path of its debug-symbols file
+         into the DLL (C:\Users\<Windows account name>\...), and the DLL goes to
+         everyone who downloads the mod. No debug info, deterministic output,
+         source paths remapped. -->
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildProjectDirectory)=/src</PathMap>
+
+    <!-- Reloaded-II install, for compile-time references only. Taken from the
+         environment so no account name is written into this file; override
+         with -p:ReloadedDir=... -->
+    <ReloadedDir Condition="'$(ReloadedDir)' == ''">$(USERPROFILE)\Desktop\Reloaded-II</ReloadedDir>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Reloaded.Mod.Interfaces"><HintPath>$(ReloadedDir)\Loader\X64\Reloaded.Mod.Interfaces.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Reloaded.Hooks.Definitions"><HintPath>$(ReloadedDir)\Mods\gbfr.discord.richpresence\Reloaded.Hooks.Definitions.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Reloaded.Hooks.ReloadedII.Interfaces"><HintPath>$(ReloadedDir)\Mods\gbfr.discord.richpresence\Reloaded.Hooks.ReloadedII.Interfaces.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Reloaded.Memory.SigScan.ReloadedII.Interfaces"><HintPath>$(ReloadedDir)\Mods\gbfr.discord.richpresence\Reloaded.Memory.SigScan.ReloadedII.Interfaces.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Reloaded.Memory.Sigscan.Definitions"><HintPath>$(ReloadedDir)\Mods\gbfr.discord.richpresence\Reloaded.Memory.Sigscan.Definitions.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Reloaded.Memory"><HintPath>$(ReloadedDir)\Mods\gbfr.discord.richpresence\Reloaded.Memory.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

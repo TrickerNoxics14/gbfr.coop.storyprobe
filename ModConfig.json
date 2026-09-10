@@ -1,0 +1,58 @@
+{
+  "ModId": "gbfr.coop.storyprobe",
+  "ModName": "GBFR Story Mode While Online",
+  "ModAuthor": "local",
+  "ModVersion": "0.21.0",
+  "ModDescription": "Allows Chapter Select and Fate Episode to be entered while an online session is active, so story content can be played with a lobby open. Patches 4 bytes of game code at runtime. Both host and guest need the same mod version AND the same game version (2.0.5).",
+  "ModDll": "gbfr.coop.storyprobe.dll",
+  "ModIcon": "icon.png",
+  "ModR2RManagedDll64": "",
+  "ModNativeDll64": "",
+  "Tags": [],
+  "CanUnload": false,
+  "HasExports": false,
+  "IsLibrary": false,
+  "IgnoreRegexes": [
+    ".*\\.json",
+    "probe\\.log.*",
+    "probe\\.salt"
+  ],
+  "IncludeRegexes": [
+    "\\.deps\\.json",
+    "\\.runtimeconfig\\.json",
+    "ModConfig\\.json"
+  ],
+  "PluginData": {
+    "GitHubDependencies": {
+      "IdToConfigMap": {
+        "Reloaded.Memory.SigScan.ReloadedII": {
+          "Config": {
+            "UserName": "Reloaded-Project",
+            "RepositoryName": "Reloaded.Memory.SigScan",
+            "UseReleaseTag": false,
+            "AssetFileName": "Mod.zip"
+          },
+          "ReleaseMetadataName": "Reloaded.Memory.SigScan.ReloadedII.ReleaseMetadata.json"
+        },
+        "reloaded.sharedlib.hooks": {
+          "Config": {
+            "UserName": "Sewer56",
+            "RepositoryName": "Reloaded.SharedLib.Hooks.ReloadedII",
+            "UseReleaseTag": true,
+            "AssetFileName": "reloaded.sharedlib.hooks.zip"
+          },
+          "ReleaseMetadataName": "Sewer56.Update.ReleaseMetadata.json"
+        }
+      }
+    }
+  },
+  "ModDependencies": [
+    "Reloaded.Memory.SigScan.ReloadedII",
+    "reloaded.sharedlib.hooks"
+  ],
+  "OptionalDependencies": [],
+  "SupportedAppId": [
+    "granblue_fantasy_relink.exe"
+  ],
+  "ProjectUrl": ""
+}
