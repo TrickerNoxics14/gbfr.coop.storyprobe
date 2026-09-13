@@ -23,6 +23,10 @@ namespace gbfr.coop.storyprobe;
 /// version and the same game version — signatures resolve to build-specific
 /// addresses.
 ///
+/// Pressing F8 while the game has focus runs the game's own "unlock controls"
+/// routine for this PC's characters. That is the only other change it makes,
+/// it happens only on that key press, and nothing is sent to the other player.
+///
 /// Everything else here is read-only logging to probe.log, which is how the gate
 /// was originally found and remains the fastest way to see what a session is
 /// doing.
@@ -129,6 +133,15 @@ public class Mod : IMod
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool VirtualProtect(nint addr, nuint size, uint newProtect, out uint oldProtect);
 
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    [DllImport("user32.dll")]
+    private static extern nint GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(nint hWnd, out uint processId);
+
     private static readonly int MbiSize = Marshal.SizeOf<MEMORY_BASIC_INFORMATION>();
 
     /// <summary>
@@ -194,6 +207,60 @@ public class Mod : IMod
     private readonly HashSet<(ulong obj, ulong hash)> _sigSeen = new();
     private readonly HashSet<(ulong obj, ulong hash)> _sigUsed = new();
     private int _sigQuest = -1;
+
+    // ----------------------------------------------------- player input limits
+
+    /// <summary>
+    /// <c>stage::quest::SetPlayerInputLimit</c> execute (RVA 0x320BD20 in 2.0.5).
+    /// Story scripts call it to lock and unlock the player's controls around
+    /// scenes. Node fields: +0x30 <c>actionId_</c> (which control), +0x34
+    /// <c>enable_</c> (1 = lock, 0 = unlock), +0x38 <c>charaIndex_</c> (0 = the
+    /// whole party, 1-4 one party slot, 5-12 the extra character slots). It sets
+    /// or clears bit <c>actionId_</c> of a mask at character+0x17A0, holding the
+    /// character's lock at +0x1870.
+    ///
+    /// The freeze at the start of Chapter 7's chase fits a lock whose unlock
+    /// never ran on that PC: the same host-only trigger problem as the hole.
+    /// Logging every call turns that into a two-PC diff.
+    /// </summary>
+    private const string SigSetPlayerInputLimit =
+        "41 56 56 57 55 53 48 81 EC 80 00 00 00 48 89 CE 8B 41 38 85 C0 7E 37 83 F8 04 0F 87 AB 00 00 00 FF C8";
+
+    /// <summary>
+    /// The game's own "unlock every character" routine (RVA 0x32068D0 in 2.0.5).
+    /// No arguments: for each of the 12 character slots it resolves the
+    /// character, takes its lock and writes 0 to the mask at +0x17A0. The F8 key
+    /// calls this instead of writing memory itself, so the game's locking is
+    /// respected. A set bit is a locked control; 0 is the game's own "all free".
+    /// </summary>
+    private const string SigClearAllInputLimits =
+        "56 57 48 83 EC 58 48 8B 05 ?? ?? ?? ?? 48 89 44 24 50 C5 F8 28 05 ?? ?? ?? ?? C5 F8 29 44 24 40 48 8D 4C 24 40 E8 ?? ?? ?? ?? 48 85 C0 74 3C 48 89 C6 48 8D B8 70 18 00 00";
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void SetPlayerInputLimitFn(nint node);
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void ClearAllInputLimitsFn();
+
+    private IHook<SetPlayerInputLimitFn> _inputLimitHook;
+    private IHook<ClearAllInputLimitsFn> _clearLimitsHook;
+
+    // Locks this PC's scripts turned on and have not turned off in the current
+    // quest, as (charaIndex, actionId). Bookkeeping from the calls seen, not a
+    // read of the real masks: a lock on "whole party" and an unlock on one slot
+    // stay separate entries. Enough to spot a lock that never came off.
+    private readonly object _limitLock = new();
+    private readonly SortedSet<(int chara, int action)> _limitsHeld = new();
+    private int _limitQuest = -1;
+    private long _lastResetLogMs = -100000;
+    private int _resetsSinceLog;
+
+    private const int VK_F8 = 0x77;
+    private Timer _keyTimer;
+    private int _keyPolling;
+    private bool _unstuckKeyDown;
+    private long _lastUnstuckMs = -100000;
+    private long _phaseChangedMs;
 
     // ------------------------------------------------------------------ state
 
@@ -390,6 +457,28 @@ public class Mod : IMod
             _recvSignalHook = _hooks.CreateHook<RecvSignalOnSignalFn>(OnRecvSignal, addr);
             _recvSignalHook.Activate();
         });
+
+        scanner.AddMainModuleScan(SigSetPlayerInputLimit, r =>
+        {
+            if (!r.Found) { Write("MISS: SetPlayerInputLimit (input-lock log unavailable, nothing else affected)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND SetPlayerInputLimit @ 0x{addr:X} (+0x{r.Offset:X})");
+            _inputLimitHook = _hooks.CreateHook<SetPlayerInputLimitFn>(OnSetPlayerInputLimit, addr);
+            _inputLimitHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigClearAllInputLimits, r =>
+        {
+            if (!r.Found) { Write("MISS: ClearAllInputLimits (F8 unstuck key unavailable, nothing else affected)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND ClearAllInputLimits @ 0x{addr:X} (+0x{r.Offset:X})");
+            _clearLimitsHook = _hooks.CreateHook<ClearAllInputLimitsFn>(OnClearAllInputLimits, addr);
+            _clearLimitsHook.Activate();
+        });
+
+        // Its own fast timer: a key press lasts a fraction of a second, far
+        // shorter than the 3 s tick.
+        _keyTimer = new Timer(_ => PollKeys(), null, 1000, 100);
 
         // Runs on its own thread so it keeps reporting when game threads stall —
         // an infinite loading screen is exactly when we most want the log.
@@ -710,6 +799,120 @@ public class Mod : IMod
         catch { /* a bad config must never take the game down */ }
     }
 
+    // ----------------------------------------------------------- input limits
+
+    private void OnSetPlayerInputLimit(nint node)
+    {
+        // Read before the call. The original reads the same three fields, so a
+        // pointer bad enough to fault here would fault there too.
+        var action = Marshal.ReadInt32(node + 0x30);
+        var on = Marshal.ReadByte(node + 0x34) != 0;
+        var chara = Marshal.ReadInt32(node + 0x38);
+
+        _inputLimitHook.OriginalFunction(node);
+        try
+        {
+            var quest = _lastQuestId;
+            string held;
+            lock (_limitLock)
+            {
+                if (quest != _limitQuest) { _limitQuest = quest; _limitsHeld.Clear(); }
+                if (on) _limitsHeld.Add((chara, action)); else _limitsHeld.Remove((chara, action));
+                held = HeldLocked();
+            }
+            Write($"INPUT LIMIT {(on ? "lock  " : "unlock")} control={action} who={CharaSlot(chara)}   held=[{held}]   quest={Categorise(quest)}");
+        }
+        catch { }
+    }
+
+    private void OnClearAllInputLimits()
+    {
+        _clearLimitsHook.OriginalFunction();
+        try
+        {
+            var now = _clock.ElapsedMilliseconds;
+            int count;
+            lock (_limitLock)
+            {
+                _limitsHeld.Clear();
+                _resetsSinceLog++;
+                // The game may call this often; one line per 10 s is plenty.
+                if (now - _lastResetLogMs < 10000) return;
+                _lastResetLogMs = now;
+                count = _resetsSinceLog;
+                _resetsSinceLog = 0;
+            }
+            Write($"INPUT LIMIT reset by game, all characters (x{count})   quest={Categorise(_lastQuestId)}");
+        }
+        catch { }
+    }
+
+    private static string CharaSlot(int i) => i <= 0 ? "party" : i <= 4 ? $"p{i}" : $"x{i - 4}";
+
+    private string HeldLocked()
+    {
+        var parts = new List<string>();
+        foreach (var (chara, action) in _limitsHeld) parts.Add($"{CharaSlot(chara)}:{action}");
+        return string.Join(" ", parts);
+    }
+
+    private void PollKeys()
+    {
+        // Timer callbacks overlap if one waits on a character's lock.
+        if (Interlocked.Exchange(ref _keyPolling, 1) == 1) return;
+        try
+        {
+            var down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+            var pressed = down && !_unstuckKeyDown;
+            _unstuckKeyDown = down;
+            if (pressed && GameHasFocus()) Unstuck();
+        }
+        catch { }
+        finally { Interlocked.Exchange(ref _keyPolling, 0); }
+    }
+
+    // GetAsyncKeyState sees keys pressed in any program, so F8 in a browser
+    // must not reach the game.
+    private static bool GameHasFocus()
+    {
+        var hwnd = GetForegroundWindow();
+        if (hwnd == 0) return false;
+        GetWindowThreadProcessId(hwnd, out var pid);
+        return pid == (uint)Environment.ProcessId;
+    }
+
+    /// <summary>
+    /// F8: unlock the controls of this PC's characters with the game's own
+    /// reset. Only this PC changes and nothing is sent anywhere. It does not
+    /// move the story on: if the script is waiting for something that never
+    /// arrived, the player can move again but the other player still has to
+    /// finish that part (as in Chapter 7, try 2).
+    /// </summary>
+    private void Unstuck()
+    {
+        var now = _clock.ElapsedMilliseconds;
+        if (now - _lastUnstuckMs < 2000) return;
+        _lastUnstuckMs = now;
+
+        var quest = _lastQuestId;
+        if (_clearLimitsHook is null)
+        {
+            Write("UNSTUCK: F8 pressed, but this game build has no matching reset function");
+            return;
+        }
+        // Characters are created and destroyed while an area loads, and
+        // resolving one mid-load is the one real risk, so wait transitions out.
+        if (quest <= 0 || now - _questEnteredMs < 5000 || now - _phaseChangedMs < 5000)
+        {
+            Write($"UNSTUCK: F8 ignored, the area is still loading   quest={Categorise(quest)}");
+            return;
+        }
+        string held;
+        lock (_limitLock) { held = HeldLocked(); _limitsHeld.Clear(); }
+        _clearLimitsHook.OriginalFunction();
+        Write($"UNSTUCK: F8, controls unlocked for this PC's characters (locks before: [{held}])   quest={Categorise(quest)}");
+    }
+
     // ------------------------------------------------------------------- tick
 
     private void Tick()
@@ -723,6 +926,7 @@ public class Mod : IMod
             {
                 var prev = _lastPhase;
                 _lastPhase = phase;
+                _phaseChangedMs = _clock.ElapsedMilliseconds;
                 Write($"PHASE {Fmt(prev)} -> {Fmt(phase)}   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
             }
 
@@ -747,7 +951,7 @@ public class Mod : IMod
 
             if (now - _lastHeartbeatMs < 15000) return;
             _lastHeartbeatMs = now;
-            Write($"[hb] quest={Categorise(_lastQuestId)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={_sigUsed.Count}");
+            Write($"[hb] quest={Categorise(_lastQuestId)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={_sigUsed.Count} limitsHeld={_limitsHeld.Count}");
         }
         catch { /* the diagnostic must never take the game down */ }
     }
@@ -972,6 +1176,7 @@ public class Mod : IMod
     public Action Disposing => () =>
     {
         try { _tickTimer?.Dispose(); } catch { }
+        try { _keyTimer?.Dispose(); } catch { }
         try { lock (_patchLock) SetUnlockPatchLocked(false); } catch { }  // leave the game as we found it
         try { lock (_logLock) { _file?.Flush(); _file?.Dispose(); } } catch { }
     };

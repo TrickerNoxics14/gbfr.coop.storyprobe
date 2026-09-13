@@ -60,19 +60,23 @@ These are real and currently unsolved:
   only on their screen; scripted triggers and destructible geometry stay local.
   In Chapter 7 the hole the volcano boss opens appeared on one screen only.
   This is the big one, and it causes most of what follows.
-- **A player can be left frozen**, HUD gone and controls locked, as if a
-  scripted scene were still playing. Reported at the start of Chapter 7's
-  chase. Quit and restart the part.
+- **A player can be left frozen**, controls locked as if a scripted scene were
+  still playing. Reported at the start of Chapter 7's chase. **Press F8** (with
+  the game window in front) to unlock your controls; see below. If the HUD
+  stays hidden or the scene still doesn't move on, the other player has to
+  finish the part, or quit and restart it.
+- **Chapter 4 cannot be finished online.** The parts load together, but the
+  chapter never completes. Move on by picking the next chapter from Chapter
+  Select.
 - **Only the party leader can interact** with quest NPCs: Rackam, "Speak
-  with…", Depart. This is the game's own rule, and the leader's Depart is what
-  carries both players into the next part, so let the lobby host do all the
-  talking. Objectives that need the other player to interact can soft-lock.
+  with…", Depart. This is the game's own rule, so let the lobby host do all
+  the talking. Objectives that need the other player to interact can
+  soft-lock.
 - **A part that leads into a town splits the group.** Departing the
   Grandcypher in Chapter 8, and the Final Chapter's Grandcypher part, sent one
   player into a town; the other went back to the lobby and the online session
-  ended. Moves from the Grandcypher straight into a fight (Chapter 4, Chapter
-  7) took both players. If a Depart splits you, pick the next part from
-  Chapter Select instead.
+  ended. If a Depart splits you, pick the next part from Chapter Select
+  instead.
 - **Cutscenes do not lock both players.** During scripted scenes the other
   player can usually still move around.
 - **Chapter staging is slow** — expect a couple of minutes on the loading screen
@@ -113,6 +117,23 @@ claims were wrong and have been withdrawn:
 
 The failure is in **spawning the companion entities in an online session**, a
 layer no data edit reaches.
+
+---
+
+## F8: unstuck key
+
+If your character is frozen in place during a story part, press **F8** while
+the game window is in front. The mod asks the game to run its own "unlock
+controls" routine for your characters, the same one the story scripts use.
+
+- It only affects **your** PC. Nothing is sent to the other player.
+- It does **not** move the story on. If the script is still waiting for
+  something that only happened on the other PC, you can move again but the
+  other player has to finish that part.
+- It does nothing while an area is still loading (the log says so), and it
+  won't fire from F8 pressed in another program.
+- Pressing it during a normal cutscene lets you move during that scene. That
+  is harmless; the next scene locks you again as usual.
 
 ---
 
@@ -189,6 +210,12 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
   itself) and `hash` says which signal. Compare the SIGNAL lines from two PCs
   in the same chapter and you can see exactly which story triggers happened on
   only one of them. This is how the Chapter 7 hole is being tracked down.
+- **INPUT LIMIT lock / unlock** — every time a story script locks or unlocks
+  a control. `control` is which control, `who` is `party` (everyone),
+  `p1`–`p4` (one party slot) or `x1`–`x8` (extra characters in a scene), and
+  `held` lists the locks still on. A lock that stays in `held` on one PC but
+  not the other is what a freeze looks like.
+- **UNSTUCK** — you pressed F8, and what was locked at that moment.
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -217,6 +244,8 @@ What this mod does and does not do, so you don't have to take it on trust:
   check, so Chapter Select can be opened while you're in a lobby. Co-op then
   runs through the game's normal online system, the same one used for
   multiplayer quests.
+- **It watches exactly one key: F8**, and only acts when the game window is in
+  front. It does not record, log or look at any other key.
 - **Only download it from the official release.** The real danger with any
   mod is someone re-uploading a tampered copy under the same name. Check that
   the SHA-256 of what you downloaded matches the one published with the release.
@@ -238,6 +267,10 @@ Fate Episode as unavailable whenever an online session exists.
 The mod refuses to patch unless it finds exactly the expected instruction, so on
 an unrecognised game build it logs a miss and leaves the game untouched. The
 patch is reverted on unload.
+
+The F8 key calls the game's own routine that clears every character's locked
+controls (RVA 0x32068D0). It writes nothing itself, and it runs only when you
+press the key.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.
