@@ -3,7 +3,7 @@
 Lets **Chapter Select** and **Fate Episode** be entered while an online session
 is active, so story content can be played co-op.
 
-Built and tested against **Endless Ragnarok 2.0.5**.
+Built and tested against **Endless Ragnarok 2.0.5 and 2.0.6**. On 2.0.6 every piece of game code the mod uses was checked byte for byte against 2.0.5: it is the same code, only moved.
 
 ---
 
@@ -22,7 +22,7 @@ The unlock is **on by default** — no config editing needed.
 |---|---|
 | The mod, installed on both | Without it the other player's Chapter Select stays locked |
 | Same **mod** version | Behaviour must be identical on both clients |
-| Same **game** version (2.0.5) | Signatures resolve to build-specific addresses |
+| Same **game** version (2.0.6 today) | Signatures resolve to build-specific addresses |
 
 Each player also needs their **own Steam account owning Relink** — one account
 cannot run the game on two machines at once.
@@ -152,18 +152,22 @@ set it **before** launching.
 
 ## Two lines worth knowing about
 
-**Your story position**, logged at startup before any lobby exists:
+**Where your save resumes**, logged once at startup from the first thing the
+game loads:
 
 ```
->>> THIS CLIENT'S STORY POSITION: Chapter 1 (101001) — both players should be near the same point <<<
+>>> THIS SAVE RESUMES IN: Chapter 4 (102000) — compare with the other player's line; the two saves should be near the same story point <<<
 ```
 
 Compare this line in both players' logs. If the two are far apart, expect
-hangs — this is the matched-progress rule made checkable in one glance.
+hangs — this is the matched-progress rule made checkable in one glance. If your
+save resumes in town, the line says so and there is nothing to compare.
 
 It is the quest the save *resumes in*, not how far the story has got. On a
 save that has finished the story it is just the last chapter played and means
-nothing; two finished saves always count as a match.
+nothing; two finished saves always count as a match. (Before 0.23 this line
+was called STORY POSITION and could wrongly report the first chapter you
+picked from Chapter Select.)
 
 **Party-change notice.** Entering a quest that reassigns the party mid-way logs
 a note, because those are where the crew may fail to arrive:

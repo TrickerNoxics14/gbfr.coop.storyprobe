@@ -37,6 +37,11 @@ public class Mod : IMod
 
     // Verified against Endless Ragnarok 2.0.x. Same patterns Nenkai's Discord
     // Rich Presence mod ships; confirmed resolving on 2.0.5.
+    //
+    // 2.0.6: every signature in this file still matches exactly once, and each
+    // hit was compared byte for byte with its 2.0.5 original. The only
+    // differences are call and data displacements (code moved), so they are
+    // the same functions, not lookalikes.
     private const string SigIsInLobby =
         "48 83 B9 ?? ?? ?? ?? ?? 74 ?? 48 8B 91 ?? ?? ?? ?? 48 8B 81";
     private const string SigGetCurrentQuestId =
@@ -293,10 +298,12 @@ public class Mod : IMod
     private nint _phaseIdAddr;
     private int _lastPhase = int.MinValue;
 
-    // The client's own story position, captured from the first story quest it
-    // loads before any lobby exists. Both players comparing this one line is the
-    // fastest way to check the matched-progress rule the mod depends on.
-    private int _saveStoryQuest = -1;
+    // Whether the first real quest of the session has been seen. On boot the
+    // game loads the quest the save resumes in, briefly, before the town. That
+    // first load is the save's story point; anything after it is the player's
+    // own pick. Both players comparing that one line is the fastest way to
+    // check the matched-progress rule the mod depends on.
+    private bool _bootQuestSeen;
 
     // Filled party slots from the last read, so the hang check can ask "is a
     // second player actually here?" without re-walking the party globals.
@@ -331,6 +338,7 @@ public class Mod : IMod
 
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private long _lastHeartbeatMs;
+    private int _ticking;
 
     private const long MaxLogBytes = 2 * 1024 * 1024;
 
@@ -582,14 +590,19 @@ public class Mod : IMod
                 Write("!!! These quests are NOT guaranteed to fail — 102000 played through fine solo online.");
             }
 
-            // Before a lobby exists, the first story quest the game loads is the
-            // client's own save position. Worth calling out plainly: mismatched
-            // story progress between the two players is the single biggest cause
-            // of hangs and of landing in the wrong chapter.
-            if (_saveStoryQuest < 0 && _lastLobbyResult != 1 && IsStory(id))
+            // Only the FIRST quest of the session is the save's own story point.
+            // This used to take the first *story* quest instead, so a save that
+            // resumes in town reported whatever chapter was picked next from
+            // Chapter Select (2026-09-12: "Chapter 0" for a save sitting in
+            // town). Mismatched story progress between the two players is the
+            // single biggest cause of hangs, so this line has to be right.
+            if (!_bootQuestSeen && id > 0)
             {
-                _saveStoryQuest = id;
-                Write($">>> THIS CLIENT'S STORY POSITION: {Categorise(id)} — both players should be near the same point <<<");
+                _bootQuestSeen = true;
+                if (_lastLobbyResult != 1 && IsStory(id))
+                    Write($">>> THIS SAVE RESUMES IN: {Categorise(id)} — compare with the other player's line; the two saves should be near the same story point <<<");
+                else
+                    Write($">>> THIS SAVE RESUMES IN: {Categorise(id)} — no story point to compare; if story parts hang, check both saves are at the same chapter <<<");
             }
         }
         return ret;
@@ -908,7 +921,13 @@ public class Mod : IMod
             return;
         }
         string held;
-        lock (_limitLock) { held = HeldLocked(); _limitsHeld.Clear(); }
+        lock (_limitLock)
+        {
+            // The set is only reset by the next lock call, so right after a
+            // quest change it still holds the previous quest's entries.
+            held = _limitQuest == quest ? HeldLocked() : "";
+            _limitsHeld.Clear();
+        }
         _clearLimitsHook.OriginalFunction();
         Write($"UNSTUCK: F8, controls unlocked for this PC's characters (locks before: [{held}])   quest={Categorise(quest)}");
     }
@@ -917,6 +936,10 @@ public class Mod : IMod
 
     private void Tick()
     {
+        // System.Threading.Timer does not wait for the previous callback. A
+        // tick held up by slow disk (the config and log writes) would otherwise
+        // run alongside the next one and log the same change twice.
+        if (Interlocked.Exchange(ref _ticking, 1) == 1) return;
         try
         {
             ReloadConfig();
@@ -951,9 +974,18 @@ public class Mod : IMod
 
             if (now - _lastHeartbeatMs < 15000) return;
             _lastHeartbeatMs = now;
-            Write($"[hb] quest={Categorise(_lastQuestId)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={_sigUsed.Count} limitsHeld={_limitsHeld.Count}");
+
+            // Both sets are reset lazily, on the first event of a new quest, so
+            // back in town they still hold the last story quest's counts. Report
+            // them only for the quest they belong to.
+            var quest = _lastQuestId;
+            int signalsUsed, limitsHeld;
+            lock (_sigLock) signalsUsed = _sigQuest == quest ? _sigUsed.Count : 0;
+            lock (_limitLock) limitsHeld = _limitQuest == quest ? _limitsHeld.Count : 0;
+            Write($"[hb] quest={Categorise(quest)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={signalsUsed} limitsHeld={limitsHeld}");
         }
         catch { /* the diagnostic must never take the game down */ }
+        finally { Interlocked.Exchange(ref _ticking, 0); }
     }
 
     /// <summary>
@@ -1036,16 +1068,14 @@ public class Mod : IMod
     /// section and played through fine with two players; one reassignment is
     /// survivable, repeated ones are not.
     ///
-    /// Party composition does not replicate between clients, so every one of
-    /// these sections is a point where the two clients disagree about who is in
-    /// the party — and the section never completes for both. These are the
-    /// quests that hang online.
-    ///
     /// Derived by decoding <c>quest/&lt;id&gt;/SectionList.msg</c> for all 54
-    /// main-story quests; only these seven qualify. It matches every observed
-    /// result: 100001 and 102000 both hung with two players, while 101002
-    /// (0 of 4), 101003 (0 of 8), 101004 (0 of 1) and 101005 (1 of 1) all
-    /// played through cleanly.
+    /// main-story quests; only these seven qualify.
+    ///
+    /// This list marks where the game changes the party, NOT why co-op fails
+    /// there. The earlier claim that these quests "hang online" was withdrawn:
+    /// 102000 played normally online for minutes, and clearing every flag
+    /// (the partyfix data mod) did not make the crew appear in 100001. The
+    /// failure is the companions never spawning online. Kept as a heads-up.
     /// </summary>
     private static readonly Dictionary<int, string> PartyHeavyQuests = new()
     {
@@ -1103,7 +1133,7 @@ public class Mod : IMod
         [0x106F00] = "Chapter 8", [0x106001] = "Chapter 8", [0x106002] = "Chapter 8",
         [0x107000] = "Chapter 9", [0x107F00] = "Chapter 9", [0x107001] = "Chapter 9",
         [0x108F00] = "Final Chapter",
-        [0x109001] = "Chapter 0", [0x10A000] = "Chapter 0", [0x10A010] = "Chapter 0",
+        [0x109001] = "Chapter Ø", [0x10A000] = "Chapter Ø", [0x10A010] = "Chapter Ø",
     };
     private static string Categorise(int id)
     {
@@ -1120,6 +1150,9 @@ public class Mod : IMod
                 '5' => "Town",
                 '6' => "dummy",
                 '7' => "Short story",
+                // A full Conflux run (2026-09-13) produced 30 distinct 8xxxxx
+                // ids and nothing else; no 8xxxxx id appears in any other log.
+                '8' => "Conflux",
                 _   => "unknown"
             };
             return $"{other} ({hex})";
