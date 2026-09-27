@@ -24,8 +24,13 @@ namespace gbfr.coop.storyprobe;
 /// addresses.
 ///
 /// Pressing F8 while the game has focus runs the game's own "unlock controls"
-/// routine for this PC's characters. That is the only other change it makes,
-/// it happens only on that key press, and nothing is sent to the other player.
+/// routine for this PC's characters. It happens only on that key press, and
+/// nothing is sent to the other player.
+///
+/// While in an online session, the Grandcypher Departs of Chapter 6 and
+/// Chapter 8 skip the walk-around town part that follows them (see
+/// <see cref="TownParts"/>), because online the host would go there alone.
+/// Offline nothing changes. Option SkipTownPartsOnline in probe_config.json.
 ///
 /// Everything else here is read-only logging to probe.log, which is how the gate
 /// was originally found and remains the fastest way to see what a session is
@@ -267,6 +272,95 @@ public class Mod : IMod
     private long _lastUnstuckMs = -100000;
     private long _phaseChangedMs;
 
+    // ------------------------------------------------------- story part chain
+
+    /// <summary>
+    /// What happens when a story part ends (quest-system functions, 2.0.5 RVAs;
+    /// 2.0.6 is +0x3C0). After a part is cleared, <c>NextPartSearch</c>
+    /// (0x62D790) walks the quest list and asks <c>OccurrenceMet</c> (0x62DB10)
+    /// whether each story quest's "follows" conditions now hold. The first one
+    /// that passes is started with <c>StartQuest</c> (0x62E860); if none does,
+    /// <c>QuestEnd</c> (0x62EBE0) sends the player to a town, the one it
+    /// computes into questSystem+0x63A54.
+    ///
+    /// Only two Grandcypher Departs lead into a walk-around town part rather
+    /// than a mission: Chapter 6 (104F00 into 104000) and Chapter 8 (106F00
+    /// into 106000). Online, the host goes into the town part alone and the
+    /// other player is sent back to the lobby town. That is the "town split".
+    /// </summary>
+    private const string SigNextPartSearch =
+        "41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 88 54 24 47";
+    private const string SigOccurrenceMet =
+        "55 41 57 41 56 41 55 41 54 56 57 53 48 83 EC 68 48 8D 6C 24 60 48 C7 45 00 FE FF FF FF 48 89 D7 49 89 CB 48";
+    private const string SigStartQuest =
+        "41 57 41 56 41 55 41 54 56 57 55 53 48 83 EC 48 44 89 CB 44 89 C6 48 89";
+    private const string SigQuestEnd =
+        "55 41 57 41 56 41 55 41 54 56 57 53 48 81 EC 98 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 10 FE FF FF FF 45 89 CF 45 89";
+
+    // Every parameter is taken at full register width and forwarded untouched,
+    // so the hooks cannot narrow or reinterpret anything the game passes.
+    [Function(CallingConventions.Microsoft)]
+    private delegate void NextPartSearchFn(nint questSys, nint arg);
+    [Function(CallingConventions.Microsoft)]
+    private delegate nint OccurrenceMetFn(nint questSys, nint questRecord, nint arg);
+    [Function(CallingConventions.Microsoft)]
+    private delegate void StartQuestFn(nint questSys, nint questIdPtr, nint section, nint a4, nint a5, nint a6);
+    [Function(CallingConventions.Microsoft)]
+    private delegate nint QuestEndFn(nint questSys, nint a2, nint a3, nint a4, nint a5, nint a6, nint a7, nint a8);
+
+    private IHook<NextPartSearchFn> _nextPartHook;
+    private IHook<OccurrenceMetFn> _occurrenceHook;
+    private IHook<StartQuestFn> _startQuestHook;
+    private IHook<QuestEndFn> _questEndHook;
+
+    // The part just cleared, set only while NextPartSearch runs on this thread,
+    // so the overrides below can never touch any other caller of OccurrenceMet
+    // (quest lists and menus ask it the same question).
+    [ThreadStatic] private static int t_chainFrom;
+
+    private const int QuestSysReplayState = 0xDD4;   // 2 or 4: Chapter Select replay
+    private const int QuestSysReturnTown = 0x63A54;  // map QuestEnd sends the player to
+    private const int QuestRecordId = 0x8;
+
+    // Town parts that Grandcypher Departs lead into, and where to go instead
+    // while online. 0 means "no part": fall through to the normal quest end.
+    private static readonly Dictionary<int, (int ship, int skipTo)> TownParts = new()
+    {
+        // Chapter 8: ship -> town part -> first mission. 106001 is a Chapter
+        // Select entry, so it is known to start cleanly on its own.
+        [0x106000] = (0x106F00, 0x106001),
+        // Chapter 6: ship -> town part -> another ship part (104F01), which is
+        // not a Chapter Select entry. Skipping into it is untested, so only the
+        // town part is blocked; both players go back to town.
+        [0x104000] = (0x104F00, 0),
+    };
+
+    private volatile bool _skipTownParts = true;
+
+    // ---------------------------------------------------------- UI lobby steps
+
+    /// <summary>
+    /// The pause menu's "Return to town" in a story area, while online, runs
+    /// <c>SetQuestExitLeaveLobbyFlag</c> and the flow <c>LeaveLobbyAndEndMultiplay</c>
+    /// (<c>LeaveLobby</c> then <c>EndOnlineAndMulti</c>), then <c>JumpPhaseTown</c>
+    /// (system/fsm/ui/ui_pausemenu_stage). That drops the session on purpose.
+    /// These are the four UI actions' Execute (vtable slot 9), hooked to log
+    /// only: each one runs unchanged.
+    /// </summary>
+    private const string SigUiSetQuestExitLeaveLobbyFlag =
+        "48 8B 05 ?? ?? ?? ?? C6 80 3D C8 06 00 01 C3";
+    private const string SigUiLeaveLobby =
+        "56 48 83 EC 30 48 8B 05 ?? ?? ?? ?? 8B 40 04 83 F8 03";
+    private const string SigUiEndOnlineAndMulti =
+        "48 8B 05 ?? ?? ?? ?? 8B 40 04 83 F8 03 75 0B 48 8B 05 ?? ?? ?? ?? C6 40 09 01 C3";
+    private const string SigUiJumpPhaseTown =
+        "55 48 83 EC 50 48 8D 6C 24 50 48 C7 45 F8 FE FF FF FF 48 89";
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate void UiActionFn(nint self, nint arg);
+
+    private readonly Dictionary<string, IHook<UiActionFn>> _uiHooks = new();
+
     // ------------------------------------------------------------------ state
 
     private ILogger _log;
@@ -331,6 +425,10 @@ public class Mod : IMod
     private string _configPath;
     private DateTime _configStamp = DateTime.MinValue;
     private Timer _tickTimer;
+
+    private static readonly Regex SkipTownFalse = new(
+        "\"SkipTownPartsOnline\"\\s*:\\s*false",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex UnlockTrue = new(
         "\"UnlockStoryWhileOnline\"\\s*:\\s*true",
@@ -483,6 +581,63 @@ public class Mod : IMod
             _clearLimitsHook = _hooks.CreateHook<ClearAllInputLimitsFn>(OnClearAllInputLimits, addr);
             _clearLimitsHook.Activate();
         });
+
+        scanner.AddMainModuleScan(SigNextPartSearch, r =>
+        {
+            if (!r.Found) { Write("MISS: NextPartSearch (part-chain log and town-part skip unavailable)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND NextPartSearch @ 0x{addr:X} (+0x{r.Offset:X})");
+            _nextPartHook = _hooks.CreateHook<NextPartSearchFn>(OnNextPartSearch, addr);
+            _nextPartHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigOccurrenceMet, r =>
+        {
+            if (!r.Found) { Write("MISS: OccurrenceMet (town-part skip unavailable)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND OccurrenceMet @ 0x{addr:X} (+0x{r.Offset:X})");
+            _occurrenceHook = _hooks.CreateHook<OccurrenceMetFn>(OnOccurrenceMet, addr);
+            _occurrenceHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigStartQuest, r =>
+        {
+            if (!r.Found) { Write("MISS: StartQuest (part-chain log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND StartQuest @ 0x{addr:X} (+0x{r.Offset:X})");
+            _startQuestHook = _hooks.CreateHook<StartQuestFn>(OnStartQuest, addr);
+            _startQuestHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigQuestEnd, r =>
+        {
+            if (!r.Found) { Write("MISS: QuestEnd (part-chain log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND QuestEnd @ 0x{addr:X} (+0x{r.Offset:X})");
+            _questEndHook = _hooks.CreateHook<QuestEndFn>(OnQuestEnd, addr);
+            _questEndHook.Activate();
+        });
+
+        foreach (var (name, sig) in new[]
+        {
+            ("SetQuestExitLeaveLobbyFlag", SigUiSetQuestExitLeaveLobbyFlag),
+            ("LeaveLobby", SigUiLeaveLobby),
+            ("EndOnlineAndMulti", SigUiEndOnlineAndMulti),
+            ("JumpPhaseTown", SigUiJumpPhaseTown),
+        })
+        {
+            scanner.AddMainModuleScan(sig, r =>
+            {
+                if (!r.Found) { Write($"MISS: UI {name} (log only)"); return; }
+                var addr = _baseAddr + r.Offset;
+                Write($"FOUND UI {name} @ 0x{addr:X} (+0x{r.Offset:X})");
+                IHook<UiActionFn> hook = null;
+                // The lambda reads the local, which is assigned before Activate.
+                hook = _hooks.CreateHook<UiActionFn>((self, arg) => OnUiAction(name, hook, self, arg), addr);
+                lock (_uiHooks) _uiHooks[name] = hook;
+                hook.Activate();
+            });
+        }
 
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
@@ -778,11 +933,12 @@ public class Mod : IMod
         try
         {
             bool wanted;
+            var skipTown = true;
             if (!File.Exists(_configPath))
             {
                 // Default ON: unlocking the gate is the point of the mod, and it
                 // means a second machine works after a plain copy, with no edit.
-                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true\n}\n");
+                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true\n}\n");
                 _configStamp = File.GetLastWriteTimeUtc(_configPath);
                 wanted = true;
             }
@@ -791,7 +947,17 @@ public class Mod : IMod
                 var stamp = File.GetLastWriteTimeUtc(_configPath);
                 if (stamp == _configStamp && _unlockLogged) return;   // unchanged, nothing to do
                 _configStamp = stamp;
-                wanted = UnlockTrue.IsMatch(File.ReadAllText(_configPath));
+                var text = File.ReadAllText(_configPath);
+                wanted = UnlockTrue.IsMatch(text);
+                // On unless explicitly false, so config files from older
+                // versions (which lack the key) get it too.
+                skipTown = !SkipTownFalse.IsMatch(text);
+            }
+
+            if (skipTown != _skipTownParts || !_unlockLogged)
+            {
+                _skipTownParts = skipTown;
+                Write($"config: SkipTownPartsOnline = {skipTown}");
             }
 
             lock (_patchLock)
@@ -930,6 +1096,106 @@ public class Mod : IMod
         }
         _clearLimitsHook.OriginalFunction();
         Write($"UNSTUCK: F8, controls unlocked for this PC's characters (locks before: [{held}])   quest={Categorise(quest)}");
+    }
+
+    // ------------------------------------------------------- story part chain
+
+    private void OnNextPartSearch(nint questSys, nint arg)
+    {
+        var from = _lastQuestId;
+        var state = -1;
+        try
+        {
+            state = Marshal.ReadInt32(questSys + QuestSysReplayState);
+            Write($"CHAIN: {Categorise(from)} cleared, looking for the next part   replay={state} inLobby={_lastLobbyResult}");
+        }
+        catch { }
+
+        var outer = t_chainFrom;
+        t_chainFrom = from;
+        try { _nextPartHook.OriginalFunction(questSys, arg); }
+        finally { t_chainFrom = outer; }
+
+        try { Write($"CHAIN: done, quest now {Categorise(_lastQuestId)}"); } catch { }
+    }
+
+    /// <summary>
+    /// The town-part skip. The original always runs first; its answer is only
+    /// changed while a part-chain search is running, the player is in an online
+    /// session, the option is on, and the quest is one of the two town parts
+    /// (or the mission straight after one, reached from its own ship part).
+    /// </summary>
+    private nint OnOccurrenceMet(nint questSys, nint questRecord, nint arg)
+    {
+        var result = _occurrenceHook.OriginalFunction(questSys, questRecord, arg);
+        try
+        {
+            var from = t_chainFrom;
+            if (from == 0 || !_skipTownParts || _lastLobbyResult != 1) return result;
+
+            var id = Marshal.ReadInt32(questRecord + QuestRecordId);
+            var met = (result & 0xFF) != 0;
+
+            if (TownParts.TryGetValue(id, out var town) && from == town.ship && met)
+            {
+                Write($"TOWN SKIP: online, so not going into the town part {Categorise(id)}" +
+                      (town.skipTo != 0 ? $" — going on to {Categorise(town.skipTo)} instead" : " — back to town instead"));
+                return 0;
+            }
+            foreach (var (townId, t) in TownParts)
+            {
+                if (t.skipTo == id && t.ship == from && !met)
+                {
+                    Write($"TOWN SKIP: starting {Categorise(id)} straight after {Categorise(from)} (skipping {Categorise(townId)})");
+                    return 1;
+                }
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    private void OnStartQuest(nint questSys, nint questIdPtr, nint section, nint a4, nint a5, nint a6)
+    {
+        try
+        {
+            var id = Marshal.ReadInt32(questIdPtr);
+            Write($"CHAIN START: {Categorise(id)} section={(int)section} load={(byte)a5}   inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        _startQuestHook.OriginalFunction(questSys, questIdPtr, section, a4, a5, a6);
+    }
+
+    private nint OnQuestEnd(nint questSys, nint a2, nint a3, nint a4, nint a5, nint a6, nint a7, nint a8)
+    {
+        var quest = _lastQuestId;
+        try
+        {
+            var state = Marshal.ReadInt32(questSys + QuestSysReplayState);
+            Write($"QUEST END: leaving {Categorise(quest)}   replay={state} inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        var result = _questEndHook.OriginalFunction(questSys, a2, a3, a4, a5, a6, a7, a8);
+        try
+        {
+            var town = Marshal.ReadInt32(questSys + QuestSysReturnTown);
+            Write($"QUEST END: going to map 0x{town:X}{TownNote(town)}   inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        return result;
+    }
+
+    private static string TownNote(int map) => map switch
+    {
+        0xC00 => " (the lobby town)",
+        >= 0xD00 and <= 0xD0F => " (a story town, not the lobby town)",
+        _ => "",
+    };
+
+    private void OnUiAction(string name, IHook<UiActionFn> hook, nint self, nint arg)
+    {
+        try { Write($"UI: {name}   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}"); } catch { }
+        hook.OriginalFunction(self, arg);
     }
 
     // ------------------------------------------------------------------- tick

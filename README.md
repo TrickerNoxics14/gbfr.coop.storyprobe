@@ -72,11 +72,16 @@ These are real and currently unsolved:
   with…", Depart. This is the game's own rule, so let the lobby host do all
   the talking. Objectives that need the other player to interact can
   soft-lock.
-- **A part that leads into a town splits the group.** Departing the
-  Grandcypher in Chapter 8, and the Final Chapter's Grandcypher part, sent one
-  player into a town; the other went back to the lobby and the online session
-  ended. If a Depart splits you, pick the next part from Chapter Select
-  instead.
+- **Two ship Departs lead into a town section: Chapter 6 and Chapter 8.**
+  Online, only the host would go there. Since 0.24 the mod skips those town
+  sections while you're in a session: in Chapter 8 the Depart goes straight to
+  the next mission, in Chapter 6 it takes you back to town (pick the next part
+  from Chapter Select). Every other Depart already takes both players. New and
+  not yet tested in play; turn it off with `SkipTownPartsOnline` (below).
+- **"Return to town" from the menu during a story part leaves the online
+  session.** The game does this on purpose, with only the warning "Any
+  unsaved progress will be lost". Finish the part instead when you can. If you
+  do leave, the other player's session keeps going and you can rejoin it.
 - **Cutscenes do not lock both players.** During scripted scenes the other
   player can usually still move around.
 - **Chapter staging is slow** — expect a couple of minutes on the loading screen
@@ -142,11 +147,14 @@ controls" routine for your characters, the same one the story scripts use.
 `probe_config.json`, re-read every 3 seconds while the game runs:
 
 ```json
-{ "UnlockStoryWhileOnline": true }
+{ "UnlockStoryWhileOnline": true, "SkipTownPartsOnline": true }
 ```
 
-Set to `false` to run the game completely stock without uninstalling. Safest to
-set it **before** launching.
+- `UnlockStoryWhileOnline`: set to `false` to run the game completely stock
+  without uninstalling. Safest to set it **before** launching.
+- `SkipTownPartsOnline`: set to `false` to let the Chapter 6 and Chapter 8
+  Departs go into their town sections as normal. It is on if the line is
+  missing, so older config files get it too.
 
 ---
 
@@ -220,6 +228,14 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
   `held` lists the locks still on. A lock that stays in `held` on one PC but
   not the other is what a freeze looks like.
 - **UNSTUCK** — you pressed F8, and what was locked at that moment.
+- **CHAIN / CHAIN START / QUEST END** — a story part ended: which part the
+  game looked for next, which one it started, or which map it sent you to
+  when there was none. `(a story town, not the lobby town)` marks the case
+  that separates players.
+- **TOWN SKIP** — the mod kept a Depart out of a town section (see above).
+- **UI: SetQuestExitLeaveLobbyFlag / LeaveLobby / EndOnlineAndMulti /
+  JumpPhaseTown** — the game's menu steps that leave the session and go to
+  town. If `LeaveLobby` appears, that is the moment the session was dropped.
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -244,10 +260,10 @@ What this mod does and does not do, so you don't have to take it on trust:
 - **The log stays on your PC** unless you send it to someone. It records quest
   numbers, party slot counts and times. Your computer's name appears only as
   an anonymous tag like `pc-3f9a2c`, which cannot be turned back into the name.
-- **It adds no network activity of its own.** It only changes one menu
-  check, so Chapter Select can be opened while you're in a lobby. Co-op then
-  runs through the game's normal online system, the same one used for
-  multiplayer quests.
+- **It adds no network activity of its own.** It changes one menu check, so
+  Chapter Select can be opened while you're in a lobby, and (online only) which
+  part comes after the Chapter 6 and 8 ship Departs. Co-op then runs through
+  the game's normal online system, the same one used for multiplayer quests.
 - **It watches exactly one key: F8**, and only acts when the game window is in
   front. It does not record, log or look at any other key.
 - **Only download it from the official release.** The real danger with any
@@ -275,6 +291,12 @@ patch is reverted on unload.
 The F8 key calls the game's own routine that clears every character's locked
 controls (RVA 0x32068D0). It writes nothing itself, and it runs only when you
 press the key.
+
+The town-section skip changes one answer the game asks itself after a story
+part ends: "does this part come next?" (RVA 0x62DB10). Only while that search
+is running, only in an online session, only for the Chapter 6 and 8 town
+sections and the mission straight after Chapter 8's. Everything else it is
+asked is passed through untouched.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.
