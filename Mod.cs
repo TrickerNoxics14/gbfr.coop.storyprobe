@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -31,6 +32,10 @@ namespace gbfr.coop.storyprobe;
 /// Chapter 8 skip the walk-around town part that follows them (see
 /// <see cref="TownParts"/>), because online the host would go there alone.
 /// Offline nothing changes. Option SkipTownPartsOnline in probe_config.json.
+///
+/// While online, "Return to town" from a story part's pause menu keeps the
+/// session instead of leaving it, and lands in the lobby town. Option
+/// KeepSessionOnReturnToTown.
 ///
 /// Everything else here is read-only logging to probe.log, which is how the gate
 /// was originally found and remains the fastest way to see what a session is
@@ -361,6 +366,94 @@ public class Mod : IMod
 
     private readonly Dictionary<string, IHook<UiActionFn>> _uiHooks = new();
 
+    // ------------------------------------------- keep the session on "Return to town"
+
+    /// <summary>
+    /// "Return to town" from the pause menu in a story area runs the flow
+    /// <c>LeaveLobbyAndEndMultiplay</c> (system/fsm/ui/ui_leave_lobby_and_end_multiplay).
+    /// Its first step asks <c>IsOnlineMode</c> twice: offline, the flow ends
+    /// at once and nothing is left; online, it leaves the session and waits
+    /// for the "left" event. Answering "offline" to exactly those two checks
+    /// (found by their script guids inside the condition object) ends the
+    /// flow without leaving, so nothing waits on an event that never comes.
+    /// The pause menu then fades out and jumps to town as usual.
+    ///
+    /// Armed only by <c>IsStageInQuestCheckMulti</c>, a condition used by the
+    /// story pause menu's exit entry and by nothing else, so network-error and
+    /// kick flows (which share the leave flow) keep leaving as before.
+    ///
+    /// Condition Evaluate is vtable slot 5 (+0x28); it returns 2 = true, 3 =
+    /// false, and the base class flips that for isReverseSuccess_.
+    /// 2.0.6: IsOnlineMode +0x1D2B7D0, IsStageInQuestCheckMulti +0x1D25860
+    /// (2.0.5 +0x620 lower); both signatures unique in both builds.
+    /// </summary>
+    private const string SigIsOnlineModeEval =
+        "48 8B 05 ?? ?? ?? ?? 8B 48 04 31 C0 83 F9 03 0F 94 C0 83 F0 03 C3";
+    private const string SigIsStageInQuestMultiEval =
+        "48 83 EC 28 48 8B 0D ?? ?? ?? ?? 48 8D 54 24 24 E8 ?? ?? ?? ?? 8B 44 24 24 89 C1 81 E1 00 00 F0 00 81 F9 00 00 40 00 0F";
+
+    /// <summary>
+    /// PhaseJump(phase, nameOrNull, fade), +0x1A3430 in 2.0.5 and 2.0.6. With
+    /// a null name it looks the phase up in its own table. A look-alike sits
+    /// at +0x1A35C0, so the pattern runs to the first byte where they differ.
+    /// </summary>
+    private const string SigPhaseJump =
+        "56 57 53 48 83 EC 40 44 89 C6 89 CF 31 C0 83 F9 FF 0F 94 C0 C1 E0 08 83 C8 01 B9 FF FF FF FF 48 89 0D ?? ?? E7 06 89 05 ?? ?? E7 06 83 FF FF 0F 84 D2 00 00 00 48 89 D3 48 85 D2 75 52 8B 0D ?? ?? E9 06 85 C9 7E 46 48 8B 05 ?? ?? E9 06 31 DB 49 89 C0 31 D2 66 66 2E 0F 1F 84 00 00 00 00 00 41 39 38 74 0E 48 FF C2 49 83 C0 20 48 39 D1 75 EF EB 1C 83 FA FD 74 15 48 63 CA 48 C1 E1 05 83 7C 08 18 00 74 07 48 8B 5C 08 10 EB 02 31 DB C7 05 ?? ?? E7 06 00 00 00 00 48 8B 05 ?? ?? 1E 07 48 8B 0D ?? ?? 1E 07 EB 0B 0F 1F 80 00 00 00 00 48 83 C0 18 48 39 C8 74 0C 39 78 04 75 F2 83 38 02 75 ED EB 07 89 F9 E8 ?? ?? 1F 02 89 3D ?? ?? 1D 07 48 85 DB 74 1F 48 89 D9 E8 ?? ?? 85 00 89 05 ?? ?? 1D 07 48 8D 0D ?? ?? 1D 07 48 89 DA E8 ?? ?? 80 04 EB 11 C7 05 ?? ?? 1D 07 00 00 00 00 C6 05 ?? ?? 1D 07 00 8B 0D ?? ?? E7 06 83 F9 FF 74 0A BA 01 00 00 00 E8 ?? ?? 4B 00 41 89 F0 41 81 E0 FF FF FF 00";
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate byte UiConditionFn(nint self);
+    [Function(CallingConventions.Microsoft)]
+    private delegate nint PhaseJumpFn(nint phase, nint name, nint fade);
+
+    private IHook<UiConditionFn> _isOnlineHook;
+    private IHook<UiConditionFn> _stageMultiHook;
+    private IHook<PhaseJumpFn> _phaseJumpHook;
+
+    private const byte CondFalse = 3;
+    // The two IsOnlineMode checks on the leave flow's first step (script guids).
+    private const int LeaveFlowCheckOnline = 1005470957;
+    private const int LeaveFlowCheckOffline = 2060158621;
+
+    // ------------------------------------------------------ cutscene skip log
+
+    /// <summary>
+    /// Log only. In-engine cutscenes (ui_skip_stage_production) sync a skip to
+    /// the other players only when <c>IsJoinLobby</c> holds and
+    /// <c>IsNoSyncSkipStageProduction</c> does not; NoSync is the byte
+    /// [0x147C48600]+0xDE1 (2.0.5). Movie cutscenes (ui_cut_scene) run
+    /// <c>SkipCut</c> locally with no sync at all. These lines show which case
+    /// a story cutscene hits. 2.0.6 RVAs: NoSync +0x1D833B0, SkipCut
+    /// +0x1BECE50, SkipStageProduction +0x1CB4B40, IsJoinLobby +0x1D58250
+    /// (all 2.0.5 +0x620); signatures unique in both builds.
+    /// </summary>
+    private const string SigIsNoSyncSkipEval =
+        "48 8B 0D ?? ?? ?? ?? 31 C0 80 B9 E1 0D 00 00 01 83 D0 02 C3";
+    private const string SigSkipCut =
+        "48 8B 05 ?? ?? ?? ?? 0F B6 49 30 88 48 46 C3";
+    private const string SigSkipStageProduction =
+        "56 57 53 48 83 EC 70 48 8B 35 ?? ?? ?? ?? 48 8B 3D ?? ?? ?? ?? B1 01 E8 ?? ?? ?? ?? 84 C0 0F 85 ?? ?? ?? ?? 8B 86 A8 00 00 00 31 C9 BB 00 00 00";
+    private const string SigIsJoinLobbyEval =
+        "48 83 EC 28 48 8B 05 ?? ?? ?? ?? 8B 48 04 B8 03 00 00 00 83 F9 03 75 2F 48 8B 0D ?? ?? ?? ?? 80 39 00 74 23 48 8B 0D";
+
+    [Function(CallingConventions.Microsoft)]
+    private delegate nint UiActionRetFn(nint self);
+
+    private IHook<UiConditionFn> _noSyncHook;
+    private IHook<UiConditionFn> _joinLobbyHook;
+    private IHook<UiActionFn> _skipCutHook;
+    private IHook<UiActionRetFn> _skipStageHook;
+
+    // IsJoinLobby is asked all over the UI; only log it shortly after a skip.
+    private long _skipWindowUntil;
+    private int _lastNoSync = -1, _lastJoinLobby = -1;
+
+    private volatile bool _keepSession = true;
+    // Clock times (ms) until which the override / the town redirect may fire.
+    private long _returnArmedUntil;
+    private long _redirectUntil;
+    private long _lastArmLogMs = -100000;
+    private int _armedDumpCount;
+
     // ------------------------------------------------------------------ state
 
     private ILogger _log;
@@ -428,6 +521,10 @@ public class Mod : IMod
 
     private static readonly Regex SkipTownFalse = new(
         "\"SkipTownPartsOnline\"\\s*:\\s*false",
+        RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static readonly Regex KeepSessionFalse = new(
+        "\"KeepSessionOnReturnToTown\"\\s*:\\s*false",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex UnlockTrue = new(
@@ -639,6 +736,69 @@ public class Mod : IMod
             });
         }
 
+        scanner.AddMainModuleScan(SigIsStageInQuestMultiEval, r =>
+        {
+            if (!r.Found) { Write("MISS: IsStageInQuestCheckMulti (Return to town keeps leaving the session)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND IsStageInQuestCheckMulti @ 0x{addr:X} (+0x{r.Offset:X})");
+            _stageMultiHook = _hooks.CreateHook<UiConditionFn>(OnStageInQuestMulti, addr);
+            _stageMultiHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigIsOnlineModeEval, r =>
+        {
+            if (!r.Found) { Write("MISS: IsOnlineMode (Return to town keeps leaving the session)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND IsOnlineMode @ 0x{addr:X} (+0x{r.Offset:X})");
+            _isOnlineHook = _hooks.CreateHook<UiConditionFn>(OnIsOnlineMode, addr);
+            _isOnlineHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigPhaseJump, r =>
+        {
+            if (!r.Found) { Write("MISS: PhaseJump (no lobby-town redirect after Return to town)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND PhaseJump @ 0x{addr:X} (+0x{r.Offset:X})");
+            _phaseJumpHook = _hooks.CreateHook<PhaseJumpFn>(OnPhaseJump, addr);
+            _phaseJumpHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigIsNoSyncSkipEval, r =>
+        {
+            if (!r.Found) { Write("MISS: IsNoSyncSkipStageProduction (cutscene log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND IsNoSyncSkipStageProduction @ 0x{addr:X} (+0x{r.Offset:X})");
+            _noSyncHook = _hooks.CreateHook<UiConditionFn>(OnNoSyncSkip, addr);
+            _noSyncHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigIsJoinLobbyEval, r =>
+        {
+            if (!r.Found) { Write("MISS: IsJoinLobby (cutscene log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND IsJoinLobby @ 0x{addr:X} (+0x{r.Offset:X})");
+            _joinLobbyHook = _hooks.CreateHook<UiConditionFn>(OnJoinLobby, addr);
+            _joinLobbyHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigSkipCut, r =>
+        {
+            if (!r.Found) { Write("MISS: SkipCut (cutscene log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND SkipCut @ 0x{addr:X} (+0x{r.Offset:X})");
+            _skipCutHook = _hooks.CreateHook<UiActionFn>(OnSkipCut, addr);
+            _skipCutHook.Activate();
+        });
+
+        scanner.AddMainModuleScan(SigSkipStageProduction, r =>
+        {
+            if (!r.Found) { Write("MISS: SkipStageProduction (cutscene log only)"); return; }
+            var addr = _baseAddr + r.Offset;
+            Write($"FOUND SkipStageProduction @ 0x{addr:X} (+0x{r.Offset:X})");
+            _skipStageHook = _hooks.CreateHook<UiActionRetFn>(OnSkipStageProduction, addr);
+            _skipStageHook.Activate();
+        });
+
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
         _keyTimer = new Timer(_ => PollKeys(), null, 1000, 100);
@@ -730,6 +890,7 @@ public class Mod : IMod
                 : "";
 
             _lastQuestId = id;
+            Interlocked.Exchange(ref _returnArmedUntil, 0);
             _questEnteredMs = now;
             Write($"QUEST CHANGE {Categorise(prev)} -> {Categorise(id)}  inLobby={_lastLobbyResult}{held}");
 
@@ -934,11 +1095,12 @@ public class Mod : IMod
         {
             bool wanted;
             var skipTown = true;
+            var keepSession = true;
             if (!File.Exists(_configPath))
             {
                 // Default ON: unlocking the gate is the point of the mod, and it
                 // means a second machine works after a plain copy, with no edit.
-                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true\n}\n");
+                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true\n}\n");
                 _configStamp = File.GetLastWriteTimeUtc(_configPath);
                 wanted = true;
             }
@@ -952,12 +1114,18 @@ public class Mod : IMod
                 // On unless explicitly false, so config files from older
                 // versions (which lack the key) get it too.
                 skipTown = !SkipTownFalse.IsMatch(text);
+                keepSession = !KeepSessionFalse.IsMatch(text);
             }
 
             if (skipTown != _skipTownParts || !_unlockLogged)
             {
                 _skipTownParts = skipTown;
                 Write($"config: SkipTownPartsOnline = {skipTown}");
+            }
+            if (keepSession != _keepSession || !_unlockLogged)
+            {
+                _keepSession = keepSession;
+                Write($"config: KeepSessionOnReturnToTown = {keepSession}");
             }
 
             lock (_patchLock)
@@ -1195,7 +1363,159 @@ public class Mod : IMod
     private void OnUiAction(string name, IHook<UiActionFn> hook, nint self, nint arg)
     {
         try { Write($"UI: {name}   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}"); } catch { }
+        // The jump to town is the last step of "Return to town": the leave
+        // flow is over, so nothing may be overridden from here on.
+        if (name == "JumpPhaseTown") Interlocked.Exchange(ref _returnArmedUntil, 0);
         hook.OriginalFunction(self, arg);
+    }
+
+    // ------------------------------------------------------ cutscene skip log
+
+    private void OpenSkipWindow() =>
+        Interlocked.Exchange(ref _skipWindowUntil, _clock.ElapsedMilliseconds + 20_000);
+
+    private byte OnNoSyncSkip(nint self)
+    {
+        var result = _noSyncHook.OriginalFunction(self);
+        try
+        {
+            OpenSkipWindow();
+            var v = result == 2 ? 1 : 0;
+            if (Interlocked.Exchange(ref _lastNoSync, v) != v)
+                Write($"CUTSCENE: skip is {(v == 1 ? "NOT synced (NoSync set)" : "synced to the lobby (NoSync clear)")}   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        return result;
+    }
+
+    private byte OnJoinLobby(nint self)
+    {
+        var result = _joinLobbyHook.OriginalFunction(self);
+        if (Interlocked.Read(ref _skipWindowUntil) <= _clock.ElapsedMilliseconds) return result;
+        try
+        {
+            var v = result == 2 ? 1 : 0;
+            if (Interlocked.Exchange(ref _lastJoinLobby, v) != v)
+                Write($"CUTSCENE: IsJoinLobby = {(v == 1 ? "yes" : "no")} during a skip   quest={Categorise(_lastQuestId)}");
+        }
+        catch { }
+        return result;
+    }
+
+    private void OnSkipCut(nint self, nint arg)
+    {
+        try
+        {
+            OpenSkipWindow();
+            Write($"CUTSCENE: movie skipped on this PC (skip={Marshal.ReadByte(self + 0x30)}; movie skips are never synced)   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        _skipCutHook.OriginalFunction(self, arg);
+    }
+
+    private nint OnSkipStageProduction(nint self)
+    {
+        try
+        {
+            OpenSkipWindow();
+            Write($"CUTSCENE: in-engine cutscene skip   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
+        }
+        catch { }
+        return _skipStageHook.OriginalFunction(self);
+    }
+
+    // ------------------------------------------- keep the session on "Return to town"
+
+    /// <summary>
+    /// Runs when the story pause menu's exit entry is chosen (this condition is
+    /// used there and nowhere else). Online in a story area, it arms the
+    /// leave-flow override for 30 s, long enough to answer the dialog. A
+    /// cancelled dialog leaves it armed, so a quest or map change also disarms
+    /// it: kicks and network errors share the leave flow and must still leave.
+    /// </summary>
+    private byte OnStageInQuestMulti(nint self)
+    {
+        var result = _stageMultiHook.OriginalFunction(self);
+        try
+        {
+            var quest = _lastQuestId;
+            if (_keepSession && _lastLobbyResult == 1 && IsStory(quest))
+            {
+                var now = _clock.ElapsedMilliseconds;
+                Interlocked.Exchange(ref _returnArmedUntil, now + 30_000);
+                // The menu asks twice in a row (once per branch); log once.
+                if (now - Interlocked.Read(ref _lastArmLogMs) > 5000)
+                {
+                    Interlocked.Exchange(ref _lastArmLogMs, now);
+                    Write($"KEEP SESSION: Return to town opened online in {Categorise(quest)} — if confirmed, the session stays up");
+                }
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    private byte OnIsOnlineMode(nint self)
+    {
+        var result = _isOnlineHook.OriginalFunction(self);
+        // Hot path: one read and out, unless "Return to town" was just chosen.
+        if (Interlocked.Read(ref _returnArmedUntil) <= _clock.ElapsedMilliseconds) return result;
+        try
+        {
+            if (!IsLeaveFlowCheck(self))
+            {
+                // If the guid is not where it is looked for, the override never
+                // fires (harmless). These lines show where it really is.
+                if (Interlocked.Increment(ref _armedDumpCount) <= 6)
+                {
+                    var words = Enumerable.Range(0, 14).Select(i => Marshal.ReadInt32(self + i * 4).ToString());
+                    Write($"KEEP SESSION diag: IsOnlineMode object words [{string.Join(" ", words)}]");
+                }
+                return result;
+            }
+            if (!_keepSession || _lastLobbyResult != 1) return result;
+            Interlocked.Exchange(ref _redirectUntil, _clock.ElapsedMilliseconds + 30_000);
+            if (result != CondFalse)
+                Write($"KEEP SESSION: not leaving the online session (Return to town in {Categorise(_lastQuestId)})");
+            return CondFalse;
+        }
+        catch { return result; }
+    }
+
+    // The condition object holds its script guid among its first fields. The
+    // exact offset is not known, so look in the small header; the two guids
+    // are random 32-bit numbers, so a match elsewhere is not a concern.
+    private static bool IsLeaveFlowCheck(nint self)
+    {
+        if (self == 0) return false;
+        for (var off = 0x8; off <= 0x30; off += 4)
+        {
+            var v = Marshal.ReadInt32(self + off);
+            if (v == LeaveFlowCheckOnline || v == LeaveFlowCheckOffline) return true;
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// After a kept-session "Return to town", the game would send the host to
+    /// the chapter's story town while the others are in the lobby town. Send
+    /// the host to the lobby town (0xC00) too.
+    /// </summary>
+    private nint OnPhaseJump(nint phase, nint name, nint fade)
+    {
+        try
+        {
+            var p = (int)phase;
+            if (p >= 0xD00 && p <= 0xD0F && _keepSession && _lastLobbyResult == 1 &&
+                Interlocked.Read(ref _redirectUntil) > _clock.ElapsedMilliseconds)
+            {
+                Interlocked.Exchange(ref _redirectUntil, 0);
+                Write($"KEEP SESSION: going to the lobby town instead of story town 0x{p:X}, where the others are");
+                return _phaseJumpHook.OriginalFunction(0xC00, 0, fade);
+            }
+        }
+        catch { }
+        return _phaseJumpHook.OriginalFunction(phase, name, fade);
     }
 
     // ------------------------------------------------------------------- tick
@@ -1215,6 +1535,8 @@ public class Mod : IMod
             {
                 var prev = _lastPhase;
                 _lastPhase = phase;
+                Interlocked.Exchange(ref _returnArmedUntil, 0);
+                Interlocked.Exchange(ref _redirectUntil, 0);
                 _phaseChangedMs = _clock.ElapsedMilliseconds;
                 Write($"PHASE {Fmt(prev)} -> {Fmt(phase)}   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
             }

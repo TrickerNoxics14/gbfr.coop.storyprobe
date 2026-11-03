@@ -78,12 +78,22 @@ These are real and currently unsolved:
   the next mission, in Chapter 6 it takes you back to town (pick the next part
   from Chapter Select). Every other Depart already takes both players. New and
   not yet tested in play; turn it off with `SkipTownPartsOnline` (below).
-- **"Return to town" from the menu during a story part leaves the online
-  session.** The game does this on purpose, with only the warning "Any
-  unsaved progress will be lost". Finish the part instead when you can. If you
-  do leave, the other player's session keeps going and you can rejoin it.
+- **"Return to town" from the menu during a story part.** The game normally
+  leaves the online session here. Since 0.25 the mod keeps the session up and
+  sends you to the lobby town, where the other players end up. New and not yet
+  tested in play: what the other player's game does when the host goes to town
+  this way is not known yet. Turn it off with `KeepSessionOnReturnToTown`
+  (below). If the session does drop, the other player's session keeps going
+  and you can rejoin it.
 - **Cutscenes do not lock both players.** During scripted scenes the other
   player can usually still move around.
+- **Skipping a cutscene only skips it for you.** Pre-rendered movies are
+  never synced by the game. In-engine scenes have a synced skip built in, but
+  the game can turn it off per scene; the log now says which happened
+  (`CUTSCENE` lines).
+- **Chapter Select has no "Ready" check.** Unlike normal quests, the guest is
+  pulled in as soon as the host starts. The game's ready check only works on
+  ordered quests, and Chapter Select never places an order.
 - **Chapter staging is slow** — expect a couple of minutes on the loading screen
   before a chapter starts, versus ~36 seconds solo.
 - Missions that drop straight into gameplay work far better than ones that stage
@@ -147,14 +157,18 @@ controls" routine for your characters, the same one the story scripts use.
 `probe_config.json`, re-read every 3 seconds while the game runs:
 
 ```json
-{ "UnlockStoryWhileOnline": true, "SkipTownPartsOnline": true }
+{ "UnlockStoryWhileOnline": true, "SkipTownPartsOnline": true, "KeepSessionOnReturnToTown": true }
 ```
 
 - `UnlockStoryWhileOnline`: set to `false` to run the game completely stock
   without uninstalling. Safest to set it **before** launching.
 - `SkipTownPartsOnline`: set to `false` to let the Chapter 6 and Chapter 8
-  Departs go into their town sections as normal. It is on if the line is
-  missing, so older config files get it too.
+  Departs go into their town sections as normal.
+- `KeepSessionOnReturnToTown`: set to `false` to let "Return to town" in a
+  story part leave the online session as the game normally does.
+
+The last two are on if their line is missing, so older config files get them
+too.
 
 ---
 
@@ -236,6 +250,12 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **UI: SetQuestExitLeaveLobbyFlag / LeaveLobby / EndOnlineAndMulti /
   JumpPhaseTown** — the game's menu steps that leave the session and go to
   town. If `LeaveLobby` appears, that is the moment the session was dropped.
+- **KEEP SESSION** — "Return to town" was chosen online in a story part: the
+  mod skipped the leave-session step and, if needed, sent you to the lobby
+  town instead of the chapter's story town. A `KEEP SESSION diag` line means
+  the leave step was not recognised and the session was left as before.
+- **CUTSCENE** — a cutscene skip on this PC: a movie (never synced), or an
+  in-engine scene, and whether the game synced that skip to the lobby.
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -261,8 +281,9 @@ What this mod does and does not do, so you don't have to take it on trust:
   numbers, party slot counts and times. Your computer's name appears only as
   an anonymous tag like `pc-3f9a2c`, which cannot be turned back into the name.
 - **It adds no network activity of its own.** It changes one menu check, so
-  Chapter Select can be opened while you're in a lobby, and (online only) which
-  part comes after the Chapter 6 and 8 ship Departs. Co-op then runs through
+  Chapter Select can be opened while you're in a lobby, (online only) which
+  part comes after the Chapter 6 and 8 ship Departs, and (online only) the
+  story menu's "Return to town" no longer leaves the session. Co-op then runs through
   the game's normal online system, the same one used for multiplayer quests.
 - **It watches exactly one key: F8**, and only acts when the game window is in
   front. It does not record, log or look at any other key.
@@ -297,6 +318,13 @@ part ends: "does this part come next?" (RVA 0x62DB10). Only while that search
 is running, only in an online session, only for the Chapter 6 and 8 town
 sections and the mission straight after Chapter 8's. Everything else it is
 asked is passed through untouched.
+
+The kept session on "Return to town" changes two answers, both only online,
+in a story part, within 30 seconds of choosing that menu entry: the menu's
+leave-session step asks "are we online?" twice (2.0.6 RVA 0x1D2B7D0) and is
+told "no" for those two checks only, so it ends without leaving; then a jump
+to a chapter's story town is sent to the lobby town instead (RVA 0x1A3430).
+Every other "are we online?" in the game is passed through untouched.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.
