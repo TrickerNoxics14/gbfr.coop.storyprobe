@@ -114,8 +114,11 @@ public class Mod : IMod
     /// Distinguishes "AI companions never spawned" from "AI exist but are not
     /// replicated" — two problems needing opposite fixes.
     /// </summary>
+    // Starts at the "xor edx,edx" (slot index 0) before the load: the same
+    // code repeats for slots 1 and 2 with "mov edx,1/2", which made the shorter
+    // pattern match three times. The global is read 34 bytes in.
     private const string SigPartyMemberArray =
-        "48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01 C6 44 24 ?? ?? 89 FA 41 89 F0 41 89 D9 FF 90 ?? ?? ?? ?? 48 8B 0D";
+        "31 D2 45 31 C0 45 31 C9 E8 ?? ?? ?? ?? 80 B8 BC 5E 00 00 00 74 2E 81 B8 A8 5E 00 00 B0 E0 7A 88 74 22 48 8B 0D ?? ?? ?? ?? 48 85 C9 74 ?? 48 8B 01 C6 44 24 ?? ?? 89 FA 41 89 F0 41 89 D9 FF 90 ?? ?? ?? ?? 48 8B 0D";
 
     /// <summary>Offset of the sete within <see cref="SigStoryOnlineGate"/>.</summary>
     private const int GatePatchOffset = 7;
@@ -640,7 +643,7 @@ public class Mod : IMod
 
         // 48 8B 0D <disp32> — 7 bytes, global at match+7+disp
         scanner.AddMainModuleScan(SigPartyMemberArray, r =>
-            _partyArrayAddr = ResolveRipGlobal(r, "PartyMemberArray", dispAt: 3, insnLen: 7));
+            _partyArrayAddr = ResolveRipGlobal(r, "PartyMemberArray", dispAt: 34 + 3, insnLen: 34 + 7));
 
         // Resolved for reference only. Not hooked: its parameter list is not
         // confirmed, and guessing one wrong on a live x64 call risks a crash for
