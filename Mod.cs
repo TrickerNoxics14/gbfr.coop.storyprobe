@@ -41,7 +41,7 @@ namespace gbfr.coop.storyprobe;
 /// was originally found and remains the fastest way to see what a session is
 /// doing.
 /// </summary>
-public class Mod : IMod
+public partial class Mod : IMod
 {
     // ---------------------------------------------------------------- signatures
 
@@ -530,6 +530,12 @@ public class Mod : IMod
         "\"KeepSessionOnReturnToTown\"\\s*:\\s*false",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private static Regex OptionFalse(string key) =>
+        new("\"" + key + "\"\\s*:\\s*false", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+    private static readonly Regex LeaderSkipFalse = OptionFalse("LeaderSkipsForEveryone");
+    private static readonly Regex ReadyCheckFalse = OptionFalse("ReadyCheckOnline");
+    private static readonly Regex RelaySignalsFalse = OptionFalse("RelayStorySignals");
+
     private static readonly Regex UnlockTrue = new(
         "\"UnlockStoryWhileOnline\"\\s*:\\s*true",
         RegexOptions.IgnoreCase | RegexOptions.Compiled);
@@ -771,6 +777,7 @@ public class Mod : IMod
             if (!r.Found) { Write("MISS: IsNoSyncSkipStageProduction (cutscene log only)"); return; }
             var addr = _baseAddr + r.Offset;
             Write($"FOUND IsNoSyncSkipStageProduction @ 0x{addr:X} (+0x{r.Offset:X})");
+            _uiMgrPtr = Rip(addr, 3, 7);
             _noSyncHook = _hooks.CreateHook<UiConditionFn>(OnNoSyncSkip, addr);
             _noSyncHook.Activate();
         });
@@ -789,6 +796,7 @@ public class Mod : IMod
             if (!r.Found) { Write("MISS: SkipCut (cutscene log only)"); return; }
             var addr = _baseAddr + r.Offset;
             Write($"FOUND SkipCut @ 0x{addr:X} (+0x{r.Offset:X})");
+            _cutHudPtr = Rip(addr, 3, 7);
             _skipCutHook = _hooks.CreateHook<UiActionFn>(OnSkipCut, addr);
             _skipCutHook.Activate();
         });
@@ -801,6 +809,8 @@ public class Mod : IMod
             _skipStageHook = _hooks.CreateHook<UiActionRetFn>(OnSkipStageProduction, addr);
             _skipStageHook.Activate();
         });
+
+        RegisterRelayScans(scanner);
 
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
@@ -854,6 +864,7 @@ public class Mod : IMod
     {
         var result = _isInLobbyHook.OriginalFunction(self);
         _lobbyCalls++;
+        FallbackPump();
 
         if (result != _lastLobbyResult)
         {
@@ -973,6 +984,14 @@ public class Mod : IMod
             }
             if (seenLine != null) Write(seenLine);
             if (usedLine != null) Write(usedLine);
+
+            // Story relay: the host passes signals on; a guest notes its own
+            // copies so a relayed one is not counted twice.
+            if (used)
+            {
+                if (_isLeader) RelaySignal(type, hash);
+                else NoteOwnSignal(hash);
+            }
         }
         catch { /* the diagnostic must never take the game down */ }
     }
@@ -1099,11 +1118,12 @@ public class Mod : IMod
             bool wanted;
             var skipTown = true;
             var keepSession = true;
+            bool leaderSkip = true, readyCheck = true, relaySignals = true;
             if (!File.Exists(_configPath))
             {
                 // Default ON: unlocking the gate is the point of the mod, and it
                 // means a second machine works after a plain copy, with no edit.
-                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true\n}\n");
+                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true,\n  \"LeaderSkipsForEveryone\": true,\n  \"ReadyCheckOnline\": true,\n  \"RelayStorySignals\": true\n}\n");
                 _configStamp = File.GetLastWriteTimeUtc(_configPath);
                 wanted = true;
             }
@@ -1118,6 +1138,9 @@ public class Mod : IMod
                 // versions (which lack the key) get it too.
                 skipTown = !SkipTownFalse.IsMatch(text);
                 keepSession = !KeepSessionFalse.IsMatch(text);
+                leaderSkip = !LeaderSkipFalse.IsMatch(text);
+                readyCheck = !ReadyCheckFalse.IsMatch(text);
+                relaySignals = !RelaySignalsFalse.IsMatch(text);
             }
 
             if (skipTown != _skipTownParts || !_unlockLogged)
@@ -1129,6 +1152,11 @@ public class Mod : IMod
             {
                 _keepSession = keepSession;
                 Write($"config: KeepSessionOnReturnToTown = {keepSession}");
+            }
+            if (leaderSkip != _leaderSkip || readyCheck != _readyCheck || relaySignals != _relaySignals || !_unlockLogged)
+            {
+                _leaderSkip = leaderSkip; _readyCheck = readyCheck; _relaySignals = relaySignals;
+                Write($"config: LeaderSkipsForEveryone = {leaderSkip}, ReadyCheckOnline = {readyCheck}, RelayStorySignals = {relaySignals}");
             }
 
             lock (_patchLock)
@@ -1410,21 +1438,20 @@ public class Mod : IMod
         try
         {
             OpenSkipWindow();
-            Write($"CUTSCENE: movie skipped on this PC (skip={Marshal.ReadByte(self + 0x30)}; movie skips are never synced)   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
+            Write($"CUTSCENE: cutscene skipped on this PC (skip={Marshal.ReadByte(self + 0x30)}; the game never syncs this kind)   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
+            RelayCutSkip(self);
         }
         catch { }
         _skipCutHook.OriginalFunction(self, arg);
     }
 
+    // The skip action runs every frame while a skippable in-engine scene plays
+    // (it polls the skip button), so it must not log per call: RunSkipStage
+    // logs only an actual skip. (v0.25 logged every frame.)
     private nint OnSkipStageProduction(nint self)
     {
-        try
-        {
-            OpenSkipWindow();
-            Write($"CUTSCENE: in-engine cutscene skip   quest={Categorise(_lastQuestId)} inLobby={_lastLobbyResult}");
-        }
-        catch { }
-        return _skipStageHook.OriginalFunction(self);
+        try { OpenSkipWindow(); } catch { }
+        return RunSkipStage(self);
     }
 
     // ------------------------------------------- keep the session on "Return to town"
@@ -1573,7 +1600,7 @@ public class Mod : IMod
             int signalsUsed, limitsHeld;
             lock (_sigLock) signalsUsed = _sigQuest == quest ? _sigUsed.Count : 0;
             lock (_limitLock) limitsHeld = _limitQuest == quest ? _limitsHeld.Count : 0;
-            Write($"[hb] quest={Categorise(quest)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={signalsUsed} limitsHeld={limitsHeld}");
+            Write($"[hb] quest={Categorise(quest)} phase={Fmt(phase)} party={party} inLobby={_lastLobbyResult} unlock={_unlockApplied} lobbyCalls={_lobbyCalls} signalsUsed={signalsUsed} limitsHeld={limitsHeld} relay={RelaySummary()}");
         }
         catch { /* the diagnostic must never take the game down */ }
         finally { Interlocked.Exchange(ref _ticking, 0); }

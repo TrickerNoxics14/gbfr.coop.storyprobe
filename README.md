@@ -87,13 +87,22 @@ These are real and currently unsolved:
   and you can rejoin it.
 - **Cutscenes do not lock both players.** During scripted scenes the other
   player can usually still move around.
-- **Skipping a cutscene only skips it for you.** Pre-rendered movies are
-  never synced by the game. In-engine scenes have a synced skip built in, but
-  the game can turn it off per scene; the log now says which happened
-  (`CUTSCENE` lines).
-- **Chapter Select has no "Ready" check.** Unlike normal quests, the guest is
-  pulled in as soon as the host starts. The game's ready check only works on
-  ordered quests, and Chapter Select never places an order.
+- **The host's cutscene skip skips it for everyone (since 0.26).** Story
+  cutscenes are never synced by the game itself. When the host skips one, the
+  mod tells the others' games, and each skips the same scene if it is playing
+  there. Everyone needs 0.26. Turn it off with `LeaderSkipsForEveryone`.
+- **Chapter Select "Ready" check (since 0.26).** When the host picks a
+  Chapter Select part online, the start waits until every other player who has
+  the mod has picked **the same part** and confirmed ("Start chapter?" → Yes).
+  That is each player's Ready. The screen stays dark while it waits. After 60
+  seconds without everyone, it is cancelled and the screen fades back in; pick
+  the part again to retry. The host picking the same part a second time while
+  waiting starts at once. Players without the mod are not waited for. Turn it
+  off with `ReadyCheckOnline`.
+- **Story signals the host gets, the others get too (since 0.26).** Some story
+  steps (the Chapter 7 volcano chase) wait for a signal that only the host's
+  game raises. The mod passes those on so the other players' story steps move
+  on too. New and not yet seen in play. Turn it off with `RelayStorySignals`.
 - **Chapter staging is slow** — expect a couple of minutes on the loading screen
   before a chapter starts, versus ~36 seconds solo.
 - Missions that drop straight into gameplay work far better than ones that stage
@@ -157,7 +166,14 @@ controls" routine for your characters, the same one the story scripts use.
 `probe_config.json`, re-read every 3 seconds while the game runs:
 
 ```json
-{ "UnlockStoryWhileOnline": true, "SkipTownPartsOnline": true, "KeepSessionOnReturnToTown": true }
+{
+  "UnlockStoryWhileOnline": true,
+  "SkipTownPartsOnline": true,
+  "KeepSessionOnReturnToTown": true,
+  "LeaderSkipsForEveryone": true,
+  "ReadyCheckOnline": true,
+  "RelayStorySignals": true
+}
 ```
 
 - `UnlockStoryWhileOnline`: set to `false` to run the game completely stock
@@ -166,9 +182,12 @@ controls" routine for your characters, the same one the story scripts use.
   Departs go into their town sections as normal.
 - `KeepSessionOnReturnToTown`: set to `false` to let "Return to town" in a
   story part leave the online session as the game normally does.
+- `LeaderSkipsForEveryone`, `ReadyCheckOnline`, `RelayStorySignals`: set to
+  `false` to turn off the three features that send messages between players
+  (see Privacy below). With all three off the mod sends nothing.
 
-The last two are on if their line is missing, so older config files get them
-too.
+All but the first are on if their line is missing, so older config files get
+them too.
 
 ---
 
@@ -254,8 +273,15 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
   mod skipped the leave-session step and, if needed, sent you to the lobby
   town instead of the chapter's story town. A `KEEP SESSION diag` line means
   the leave step was not recognised and the session was left as before.
-- **CUTSCENE** — a cutscene skip on this PC: a movie (never synced), or an
-  in-engine scene, and whether the game synced that skip to the lobby.
+- **CUTSCENE** — a cutscene skip on this PC, and which kind it was.
+- **RELAY** — the message channel: on/off, whether this PC is the host or a
+  guest, and which other players have the mod. `dropped a damaged message`
+  should never appear; if it does, send the log.
+- **LEADER SKIP** — the host's skip was passed on, or arrived and skipped
+  the same scene here.
+- **READY** — the Chapter Select ready check: who is ready, waiting, started
+  or cancelled.
+- **STORY RELAY** — a story signal from the host reached this PC.
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -267,9 +293,21 @@ machine it carries the first machine's history. Tell sessions apart by the
 
 What this mod does and does not do, so you don't have to take it on trust:
 
-- **It has no network code at all.** The DLL references nothing that can open
-  a connection — no sockets, no web requests, no downloads or uploads. It
-  cannot send anything anywhere.
+- **It opens no connections of its own.** The DLL references nothing that can
+  open a connection: no sockets, no web requests, no downloads or uploads.
+- **What it sends (since 0.26), and to whom.** Only while you are in an online
+  session, and only to the players in that session. The messages travel
+  through the game's own "sync flags", the on/off markers the game already
+  sends to the other players (for example "this player is ready"), using nine
+  of them that the game never uses. Nothing else is sent:
+  - "I have the mod" (every 20 seconds),
+  - "the host skipped this cutscene" (with the quest number),
+  - "I'm ready for this Chapter Select part" (with the part's number),
+  - a story signal number from the host's game (the game's own internal number
+    for a story step).
+
+  No names, Steam IDs, email, IP address, account data or file contents are
+  ever sent. Turn all of it off with the three options in Configuration.
 - **It never reads your personal information.** No Steam ID, email, IP
   address or account data. It does not touch the registry or start other
   programs.
@@ -280,11 +318,10 @@ What this mod does and does not do, so you don't have to take it on trust:
 - **The log stays on your PC** unless you send it to someone. It records quest
   numbers, party slot counts and times. Your computer's name appears only as
   an anonymous tag like `pc-3f9a2c`, which cannot be turned back into the name.
-- **It adds no network activity of its own.** It changes one menu check, so
-  Chapter Select can be opened while you're in a lobby, (online only) which
-  part comes after the Chapter 6 and 8 ship Departs, and (online only) the
-  story menu's "Return to town" no longer leaves the session. Co-op then runs through
-  the game's normal online system, the same one used for multiplayer quests.
+- **Co-op itself runs through the game's normal online system,** the same one
+  used for multiplayer quests. The mod changes one menu check (so Chapter
+  Select opens in a lobby) and, online only, which part follows the Chapter 6
+  and 8 ship Departs and what the story menu's "Return to town" does.
 - **It watches exactly one key: F8**, and only acts when the game window is in
   front. It does not record, log or look at any other key.
 - **Only download it from the official release.** The real danger with any
@@ -325,6 +362,20 @@ leave-session step asks "are we online?" twice (2.0.6 RVA 0x1D2B7D0) and is
 told "no" for those two checks only, so it ends without leaving; then a jump
 to a chapter's story town is sent to the lobby town instead (RVA 0x1A3430).
 Every other "are we online?" in the game is passed through untouched.
+
+The message channel (0.26) uses the game's own sync-flag setter (2.0.6 RVA
+0x74A4D0): the mod calls it for its own player's flags only, with flag ids
+0x01, 0x02, 0x06-0x0A, 0x12 and 0x1B, and watches it to read the other
+players' changes. Every other flag passes through untouched. On top of it:
+- the host's cutscene skip is passed on; another player's game then sets its
+  own cutscene skip flag (only while a cutscene plays) or, for an in-engine
+  scene, sees one skip-button press inside its own skip routine, so the
+  game's own skip rules still apply;
+- Chapter Select's start (RVA 0x1BE8970) can be held on the host until the
+  others are ready, then run; on cancel the game's own fade-in (0x1C08790) is
+  run; a guest's own pick becomes its Ready answer;
+- a story step waiting for a signal (RVA 0x321A4F0) is counted as reached
+  when the host's game reported that same signal, once per step.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.
