@@ -68,10 +68,12 @@ These are real and currently unsolved:
 - **Chapter 4 cannot be finished online.** The parts load together, but the
   chapter never completes. Move on by picking the next chapter from Chapter
   Select.
-- **Only the party leader can interact** with quest NPCs: Rackam, "Speak
-  with…", Depart. This is the game's own rule, so let the lobby host do all
-  the talking. Objectives that need the other player to interact can
-  soft-lock.
+- **Only the lobby host can interact** with quest NPCs: Rackam, "Speak
+  with…", Depart. This is the game's own rule, so let the host do all the
+  talking. Objectives that need the other player to interact can soft-lock.
+  Not fixed yet: making a guest's press act on the host's game needs a step
+  that is not safe to guess at. Since 0.27 the log records what a press does
+  online (`INTERACT` lines), which is what a safe fix needs.
 - **Two ship Departs lead into a town section: Chapter 6 and Chapter 8.**
   Online, only the host would go there. Since 0.24 the mod skips those town
   sections while you're in a session: in Chapter 8 the Depart goes straight to
@@ -103,6 +105,16 @@ These are real and currently unsolved:
   steps (the Chapter 7 volcano chase) wait for a signal that only the host's
   game raises. The mod passes those on so the other players' story steps move
   on too. New and not yet seen in play. Turn it off with `RelayStorySignals`.
+- **Main Menu with no list online (fixed in 0.27).** Opening the Main Menu in
+  a story area online sometimes showed only the background. The game has two
+  ways to open the menu, and one of them waits on timers that can stall
+  online; the mod makes it take the other way, which builds the whole menu at
+  once (with a short fade). Turn it off with `FullMainMenuOnline`.
+- **Tutorial popups online (fixed in 0.27).** Every story tutorial is marked
+  "offline only" by the game, so none appeared in a lobby. The mod lets them
+  show in story areas online. A tutorial window pauses only your own game
+  (your input and menus), not the other players'. Turn it off with
+  `TutorialsOnline`.
 - **Chapter staging is slow** — expect a couple of minutes on the loading screen
   before a chapter starts, versus ~36 seconds solo.
 - Missions that drop straight into gameplay work far better than ones that stage
@@ -117,15 +129,19 @@ If you soft-lock, quit to town and re-enter; nothing is corrupted.
 Quests where the crew is **already with you** play fine online — a full 4/4
 party spawns and behaves. Confirmed on Chapter 1 parts 1-2 and Chapter 3.
 
-Quests where the crew is **scripted to join you partway through** do not work.
-The Prologue and the Chapter 1 opening put you alone with Lyria and bring the
-others in mid-fight. Online, that arrival scene plays and the dialogue fires,
-but nobody is there — invisible during the scene, absent after it. The Quakadile
-fight in Chapter 1 then cannot be finished, because it wants a Link Attack and
-you have no one to link with.
+Quests where the crew is **scripted to join you partway through** used to
+fail. The Prologue and the Chapter 1 opening put you alone with Lyria and bring
+the others in mid-fight. Online, that arrival scene played and the dialogue
+fired, but nobody was there, so the Quakadile fight in Chapter 1 could not be
+finished (it wants a Link Attack).
 
-There is no workaround. Quit the chapter and play something else; nothing is
-corrupted.
+**Since 0.27 the mod fixes this.** The cause is one check in the game: online,
+the routine that spawns AI party members skips slots 2-4 entirely. During a
+story section's party step the mod lifts that skip, and fills **only empty
+slots**: a slot that already holds a character (the other players) is never
+touched, the same way CPU allies fill empty slots in online quests. Each PC
+spawns the crew on its own screen. New and not yet seen in play; turn it off
+with `SpawnCrewOnline`. The log line is `CREW`.
 
 ### What this is not
 
@@ -172,7 +188,10 @@ controls" routine for your characters, the same one the story scripts use.
   "KeepSessionOnReturnToTown": true,
   "LeaderSkipsForEveryone": true,
   "ReadyCheckOnline": true,
-  "RelayStorySignals": true
+  "RelayStorySignals": true,
+  "SpawnCrewOnline": true,
+  "FullMainMenuOnline": true,
+  "TutorialsOnline": true
 }
 ```
 
@@ -185,6 +204,12 @@ controls" routine for your characters, the same one the story scripts use.
 - `LeaderSkipsForEveryone`, `ReadyCheckOnline`, `RelayStorySignals`: set to
   `false` to turn off the three features that send messages between players
   (see Privacy below). With all three off the mod sends nothing.
+- `SpawnCrewOnline`: set to `false` to stop the mod filling empty party
+  slots with the crew online (Chapter 1's Quakadile fight then can't be won).
+- `FullMainMenuOnline`: set to `false` to let the Main Menu open the game's
+  own way online (which sometimes shows no menu list).
+- `TutorialsOnline`: set to `false` to hide story tutorials online again, as
+  the game does.
 
 All but the first are on if their line is missing, so older config files get
 them too.
@@ -282,6 +307,14 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **READY** — the Chapter Select ready check: who is ready, waiting, started
   or cancelled.
 - **STORY RELAY** — a story signal from the host reached this PC.
+- **CREW** — a story party step online: which empty slots got the crew, and
+  which filled slots (the other players) were left alone.
+- **MENU** — the Main Menu was opened online in a story area and built the
+  full way.
+- **TUTORIAL** — story tutorials are being shown online in this part.
+- **INTERACT** — online only, at most 40 a minute: an interact press, a
+  target set to "interact requested", or a world object becoming
+  interactable, and on which PC. Log only; nothing is changed.
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -376,6 +409,13 @@ players' changes. Every other flag passes through untouched. On top of it:
   run; a guest's own pick becomes its Ready answer;
 - a story step waiting for a signal (RVA 0x321A4F0) is counted as reached
   when the host's game reported that same signal, once per step.
+
+Since 0.27, online in story areas only: during a story section's party
+step (RVA 0x31F5550) the jump that skips spawning party slots 2-4 online
+(0x31F76F2, 6 bytes) is lifted and put back when the step ends, and filled
+slots are protected from removal and respawn; the Main Menu's open check
+(0x1D5FD60) answers "full way"; a tutorial step (0x320E6E0) is treated as
+shown online for the length of its call.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.
