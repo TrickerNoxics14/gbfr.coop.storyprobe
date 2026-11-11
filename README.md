@@ -68,12 +68,14 @@ These are real and currently unsolved:
 - **Chapter 4 cannot be finished online.** The parts load together, but the
   chapter never completes. Move on by picking the next chapter from Chapter
   Select.
-- **Only the lobby host can interact** with quest NPCs: Rackam, "Speak
-  with…", Depart. This is the game's own rule, so let the host do all the
-  talking. Objectives that need the other player to interact can soft-lock.
-  Not fixed yet: making a guest's press act on the host's game needs a step
-  that is not safe to guess at. Since 0.27 the log records what a press does
-  online (`INTERACT` lines), which is what a safe fix needs.
+- **Guests talking to story NPCs (new in 0.28, not yet seen in play).**
+  Before 0.28 only the lobby host could use Rackam, "Speak with…" or Depart.
+  The game already lets a guest's press ask the host to run it, but in story
+  areas the guest never got the prompt. With the mod on **both** PCs, the
+  guest now gets the prompt, and the press runs on the host's game, so
+  everyone moves on together. The host still decides: a press only runs if
+  the object is ready on the host's game too. If it does nothing, let the host
+  do it. Turn it off with `GuestInteractOnline`. The log line is `INTERACT`.
 - **Two ship Departs lead into a town section: Chapter 6 and Chapter 8.**
   Online, only the host would go there. Since 0.24 the mod skips those town
   sections while you're in a session: in Chapter 8 the Depart goes straight to
@@ -140,8 +142,9 @@ the routine that spawns AI party members skips slots 2-4 entirely. During a
 story section's party step the mod lifts that skip, and fills **only empty
 slots**: a slot that already holds a character (the other players) is never
 touched, the same way CPU allies fill empty slots in online quests. Each PC
-spawns the crew on its own screen. New and not yet seen in play; turn it off
-with `SpawnCrewOnline`. The log line is `CREW`.
+spawns the crew on its own screen, which is also how the game itself handles
+CPU allies in online quests. New and not yet seen in play; turn it off with
+`SpawnCrewOnline`. The log line is `CREW`.
 
 ### What this is not
 
@@ -191,7 +194,8 @@ controls" routine for your characters, the same one the story scripts use.
   "RelayStorySignals": true,
   "SpawnCrewOnline": true,
   "FullMainMenuOnline": true,
-  "TutorialsOnline": true
+  "TutorialsOnline": true,
+  "GuestInteractOnline": true
 }
 ```
 
@@ -210,6 +214,8 @@ controls" routine for your characters, the same one the story scripts use.
   own way online (which sometimes shows no menu list).
 - `TutorialsOnline`: set to `false` to hide story tutorials online again, as
   the game does.
+- `GuestInteractOnline`: set to `false` to go back to "only the host can talk
+  to story NPCs". It also stops the guest's press being sent to the host.
 
 All but the first are on if their line is missing, so older config files get
 them too.
@@ -312,9 +318,11 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **MENU** — the Main Menu was opened online in a story area and built the
   full way.
 - **TUTORIAL** — story tutorials are being shown online in this part.
-- **INTERACT** — online only, at most 40 a minute: an interact press, a
-  target set to "interact requested", or a world object becoming
-  interactable, and on which PC. Log only; nothing is changed.
+- **INTERACT** — online only, at most 40 a minute. Guest: a story object
+  opened to this guest, a press sent to the host, or a press that could not
+  be sent (the object has no network id). Host: a guest's press ran here, or
+  was ignored (the object was not ready here yet, or the player is not known
+  here yet).
 
 Note the log **travels with the mod folder**. If you copy this folder to another
 machine it carries the first machine's history. Tell sessions apart by the
@@ -333,14 +341,18 @@ What this mod does and does not do, so you don't have to take it on trust:
   through the game's own "sync flags", the on/off markers the game already
   sends to the other players (for example "this player is ready"), using nine
   of them that the game never uses. Nothing else is sent:
-  - "I have the mod" (every 20 seconds),
+  - "I have the mod" (every 20 seconds), and whether this PC hosts the lobby,
   - "the host skipped this cutscene" (with the quest number),
   - "I'm ready for this Chapter Select part" (with the part's number),
   - a story signal number from the host's game (the game's own internal number
-    for a story step).
+    for a story step),
+  - "I pressed this object" from a guest (since 0.28): the game's own
+    in-session numbers for the object and for the guest's character, the same
+    two numbers the game itself sends for that press.
 
   No names, Steam IDs, email, IP address, account data or file contents are
-  ever sent. Turn all of it off with the three options in Configuration.
+  ever sent. Turn all of it off with the three options in Configuration, plus
+  `GuestInteractOnline`.
 - **It never reads your personal information.** No Steam ID, email, IP
   address or account data. It does not touch the registry or start other
   programs.
@@ -416,6 +428,17 @@ step (RVA 0x31F5550) the jump that skips spawning party slots 2-4 online
 slots are protected from removal and respawn; the Main Menu's open check
 (0x1D5FD60) answers "full way"; a tutorial step (0x320E6E0) is treated as
 shown online for the length of its call.
+
+Since 0.28, online in story areas only, when the host runs the mod: on a
+guest, an Interact object that waits for the host's announcement (start
+RVA 0x96E100, byte +0x235) stops waiting, so its prompt shows; a guest's
+press (C::Interact, 0x219D130) still runs the game's own code and is also
+sent to the host. On the host, the game's receiver for a guest's press
+(0xB9FBC0) is gated: a press from a player the host does not know is dropped
+in any area (the game would otherwise run it with no player and crash); in
+story areas a press on an object that is not enabled on the host is dropped,
+and the same press arriving twice (the game's copy and the mod's) runs once.
+A relayed press is handed to that same receiver as the game's own request.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.

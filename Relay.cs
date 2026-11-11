@@ -238,7 +238,8 @@ public partial class Mod
         Pump();
     }
 
-    private long _lastMainPumpMs = -100_000, _lastFallbackMs;
+    private long _lastMainPumpMs = -100_000, _lastFallbackMs, _lastOwnerCheckMs = -100_000;
+    private bool _ownsLobbySent;
     private int _pumping;
 
     /// <summary>
@@ -263,14 +264,24 @@ public partial class Mod
             var now = _clock.ElapsedMilliseconds;
             RefreshRoles();
             DrainInbox(now);
+            if (_relayActive && now - _lastOwnerCheckMs >= 1000)
+            {
+                // The lobby-owner bit in HELLO: re-announce at once when it changes.
+                _lastOwnerCheckMs = now;
+                var (_, owns) = LobbyOwnership();
+                if (owns != _ownsLobbySent) _lastHelloSent = -100_000;
+            }
             if (_relayActive && now - _lastHelloSent > 20_000)
             {
                 _lastHelloSent = now;
-                Send(RelayCodec.TypeHello, Array.Empty<byte>());
+                var (_, ownsLobby) = LobbyOwnership();
+                _ownsLobbySent = ownsLobby;
+                Send(RelayCodec.TypeHello, new[] { ownsLobby ? RelayCodec.HelloOwnsLobby : (byte)0 });
             }
             FlushOutbox(now);
             PumpCutSkip(now);
             PumpReady(now);
+            PumpOpenLater(now);
         }
         catch (Exception ex) { RelayError("pump", ex); }
         finally { Interlocked.Exchange(ref _pumping, 0); }
@@ -291,7 +302,7 @@ public partial class Mod
                 ? $"RELAY: on (this PC is {(_isLeader ? "the host" : "a guest")}, player slot {slot})"
                 : "RELAY: off (not in an online session)");
             if (active) _lastHelloSent = -100_000;
-            else lock (_relayLock) { Array.Clear(_peerSeen); _outbox.Clear(); }
+            else { lock (_relayLock) { Array.Clear(_peerSeen); Array.Clear(_peerOwner); _outbox.Clear(); } ForgetOpened(); }
         }
     }
 
@@ -326,6 +337,7 @@ public partial class Mod
     /// <summary>Every flag change, local or received, passes here; ours are decoded, all are forwarded.</summary>
     private void OnSetSyncFlag(nint mgr, nint player, nint id, nint value)
     {
+        RelayCodec.Frame interact = null;
         try
         {
             var flag = (int)(id & 0xFFFF);
@@ -339,13 +351,16 @@ public partial class Mod
                     frame = _decoders[from].Feed(flag, (value & 0xFF) != 0);
                     errors = _decoders[from].Errors;
                 }
-                if (frame != null) _inbox.Enqueue((from, frame));
+                if (frame != null && frame.Type == RelayCodec.TypeInteract) interact = frame;
+                else if (frame != null) _inbox.Enqueue((from, frame));
                 if (errors > _frameErrorsLogged && Interlocked.Exchange(ref _frameErrorsLogged, errors) < errors && ErrorLogDue())
                     Write($"RELAY: dropped a damaged message from player slot {from} (total {errors})");
             }
         }
         catch { }
         _setFlagHook.OriginalFunction(mgr, player, id, value);
+        // A guest's press runs where the game runs its own request: in this receive path.
+        if (interact != null) try { RunRelayedInteract((int)player, interact.Payload); } catch (Exception ex) { RelayError("relayed interaction", ex); }
     }
 
     private void DrainInbox(long now)
@@ -360,6 +375,7 @@ public partial class Mod
                     var fresh = _peerSeen[from] == 0 || now - _peerSeen[from] > PeerAliveMs;
                     if (fresh) _peerReady[from] = (0, 0);   // a slot reused by someone new starts not ready
                     _peerSeen[from] = Math.Max(1, now); _peerLeader[from] = f.FromLeader;   // 0 means "never"
+                    _peerOwner[from] = p.Length >= 1 && (p[0] & RelayCodec.HelloOwnsLobby) != 0;
                     if (fresh)
                     {
                         Write($"RELAY: player slot {from} has the mod{(f.FromLeader ? " (host)" : "")}");

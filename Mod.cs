@@ -538,6 +538,7 @@ public partial class Mod : IMod
     private static readonly Regex SpawnCrewFalse = OptionFalse("SpawnCrewOnline");
     private static readonly Regex FullMenuFalse = OptionFalse("FullMainMenuOnline");
     private static readonly Regex TutorialsFalse = OptionFalse("TutorialsOnline");
+    private static readonly Regex GuestInteractFalse = OptionFalse("GuestInteractOnline");
 
     private static readonly Regex UnlockTrue = new(
         "\"UnlockStoryWhileOnline\"\\s*:\\s*true",
@@ -815,6 +816,7 @@ public partial class Mod : IMod
 
         RegisterRelayScans(scanner);
         RegisterCoopFixScans(scanner);
+        RegisterInteractScans(scanner);
 
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
@@ -1122,12 +1124,12 @@ public partial class Mod : IMod
             bool wanted;
             var skipTown = true;
             var keepSession = true;
-            bool leaderSkip = true, readyCheck = true, relaySignals = true, spawnCrew = true, fullMenu = true, tutorials = true;
+            bool leaderSkip = true, readyCheck = true, relaySignals = true, spawnCrew = true, fullMenu = true, tutorials = true, guestInteract = true;
             if (!File.Exists(_configPath))
             {
                 // Default ON: unlocking the gate is the point of the mod, and it
                 // means a second machine works after a plain copy, with no edit.
-                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true,\n  \"LeaderSkipsForEveryone\": true,\n  \"ReadyCheckOnline\": true,\n  \"RelayStorySignals\": true,\n  \"SpawnCrewOnline\": true,\n  \"FullMainMenuOnline\": true,\n  \"TutorialsOnline\": true\n}\n");
+                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true,\n  \"LeaderSkipsForEveryone\": true,\n  \"ReadyCheckOnline\": true,\n  \"RelayStorySignals\": true,\n  \"SpawnCrewOnline\": true,\n  \"FullMainMenuOnline\": true,\n  \"TutorialsOnline\": true,\n  \"GuestInteractOnline\": true\n}\n");
                 _configStamp = File.GetLastWriteTimeUtc(_configPath);
                 wanted = true;
             }
@@ -1148,6 +1150,7 @@ public partial class Mod : IMod
                 spawnCrew = !SpawnCrewFalse.IsMatch(text);
                 fullMenu = !FullMenuFalse.IsMatch(text);
                 tutorials = !TutorialsFalse.IsMatch(text);
+                guestInteract = !GuestInteractFalse.IsMatch(text);
             }
 
             if (skipTown != _skipTownParts || !_unlockLogged)
@@ -1165,10 +1168,10 @@ public partial class Mod : IMod
                 _leaderSkip = leaderSkip; _readyCheck = readyCheck; _relaySignals = relaySignals;
                 Write($"config: LeaderSkipsForEveryone = {leaderSkip}, ReadyCheckOnline = {readyCheck}, RelayStorySignals = {relaySignals}");
             }
-            if (spawnCrew != _spawnCrewOnline || fullMenu != _fullMenuOnline || tutorials != _tutorialsOnline || !_unlockLogged)
+            if (spawnCrew != _spawnCrewOnline || fullMenu != _fullMenuOnline || tutorials != _tutorialsOnline || guestInteract != _guestInteract || !_unlockLogged)
             {
-                _spawnCrewOnline = spawnCrew; _fullMenuOnline = fullMenu; _tutorialsOnline = tutorials;
-                Write($"config: SpawnCrewOnline = {spawnCrew}, FullMainMenuOnline = {fullMenu}, TutorialsOnline = {tutorials}");
+                _spawnCrewOnline = spawnCrew; _fullMenuOnline = fullMenu; _tutorialsOnline = tutorials; _guestInteract = guestInteract;
+                Write($"config: SpawnCrewOnline = {spawnCrew}, FullMainMenuOnline = {fullMenu}, TutorialsOnline = {tutorials}, GuestInteractOnline = {guestInteract}");
             }
 
             lock (_patchLock)

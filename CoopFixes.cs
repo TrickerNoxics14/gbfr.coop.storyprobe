@@ -86,6 +86,12 @@ public partial class Mod
     // may swap those like the game does offline; every other filled slot (the
     // other players) stays protected.
     private readonly nint[] _crewEntity = new nint[4];
+    // ...and the slot's spawn handle (index, record, generation) at that time: a
+    // pointer alone could be a new character that reused the same memory.
+    private readonly (int idx, long rec, long gen)[] _crewHandle = new (int, long, long)[4];
+    /// <summary>The party slots' spawn handles (3 x 8 bytes each), from the lea in PartySlotRemove. 2.0.6 +0x7035CA0.</summary>
+    private nint _partyHandlesAddr;
+    internal const int PartyHandlesDispAt = 33;
     private int _crewQuest = -1;
 
     // ------------------------------------------------------------- main menu
@@ -116,25 +122,6 @@ public partial class Mod
     private volatile bool _tutorialsOnline = true;
     private int _tutorialLogQuest = -1;
 
-    // ------------------------------------------- interaction (log only, for a later fix)
-
-    /// <summary>
-    /// Log only. Online only the lobby owner's world interactions (Rackam,
-    /// Depart, quest objects) move the story; a safe guest-to-host relay needs
-    /// to know what a guest's press does. These record it: the press handler
-    /// (2.0.6 +0x2335720), the interaction state change (+0x2337CE0, state 3 =
-    /// interact requested) and a placement becoming interactable (+0x96E100,
-    /// id = **(placement+0x220)).
-    /// </summary>
-    private const string SigInteractPress =
-        "41 56 56 57 53 48 81 EC 88 00 00 00 48 89 CE 4C 8B 41 10 41 8B 88 60 11 00 00 85 C9 0F 84 ?? ?? ?? ?? 48 8B 15 ?? ?? ?? ?? 49 8B 80 68 11 00 00";
-    private const string SigInteractSetState =
-        "56 57 48 81 EC 88 00 00 00 89 54 24 2C 45 84 C0 0F 84 ?? ?? ?? ?? 89 D6 48 89 CF 48 8B 89 88 00 00 00 48 85 C9 0F 94 C2 39 77 50 0F 95 C0";
-    private const string SigPlacementActivate =
-        "55 41 56 56 57 53 48 81 EC 80 00 00 00 48 8D AC 24 80 00 00 00 48 C7 45 F8 FE FF FF FF 48 83 B9 10 03 00 00 00 0F 85 ?? ?? ?? ?? 48 89 CE";
-    private IHook<QuestActionFn> _interactPressHook, _interactStateHook, _placementActivateHook;
-    private long _interactLogWindow; private int _interactLogCount;
-
     // ------------------------------------------------------------------ setup
 
     private void RegisterCoopFixScans(IStartupScanner scanner)
@@ -152,13 +139,10 @@ public partial class Mod
         Hook(scanner, SigBeginSection, "BeginSection", "crew join online off", a => { _beginSectionHook = _hooks.CreateHook<BeginSectionFn>(OnBeginSection, a); _beginSectionHook.Activate(); });
         Hook(scanner, SigPartyData, "PartyData", "crew join online off", a => { _partyDataHook = _hooks.CreateHook<PartyDataFn>(OnPartyData, a); _partyDataHook.Activate(); });
         Hook(scanner, SigPartySlotRelease, "PartySlotRelease", "crew join online off", a => { _slotReleaseHook = _hooks.CreateHook<SlotReleaseFn>(OnSlotRelease, a); _slotReleaseHook.Activate(); });
-        Hook(scanner, SigPartySlotRemove, "PartySlotRemove", "crew join online off", a => { _slotRemoveHook = _hooks.CreateHook<SlotRemoveFn>(OnSlotRemove, a); _slotRemoveHook.Activate(); });
+        Hook(scanner, SigPartySlotRemove, "PartySlotRemove", "crew join online off", a => { _partyHandlesAddr = Rip(a, PartyHandlesDispAt, PartyHandlesDispAt + 4); _slotRemoveHook = _hooks.CreateHook<SlotRemoveFn>(OnSlotRemove, a); _slotRemoveHook.Activate(); });
         Hook(scanner, SigPartySlotSpawn, "PartySlotSpawn", "crew join online off", a => { _slotSpawnHook = _hooks.CreateHook<SlotSpawnFn>(OnSlotSpawn, a); _slotSpawnHook.Activate(); });
         Hook(scanner, SigPauseOpenSkipEval, "PauseOpenSkip", "Main Menu fix off", a => { _pauseOpenSkipHook = _hooks.CreateHook<UiConditionFn>(OnPauseOpenSkip, a); _pauseOpenSkipHook.Activate(); });
         Hook(scanner, SigSetTutorialWindow, "SetTutorialWindow", "tutorials online off", a => { _setTutorialHook = _hooks.CreateHook<QuestActionFn>(OnSetTutorialWindow, a); _setTutorialHook.Activate(); });
-        Hook(scanner, SigInteractPress, "InteractPress", "interaction log off", a => { _interactPressHook = _hooks.CreateHook<QuestActionFn>(OnInteractPress, a); _interactPressHook.Activate(); });
-        Hook(scanner, SigInteractSetState, "InteractSetState", "interaction log off", a => { _interactStateHook = _hooks.CreateHook<QuestActionFn>(OnInteractSetState, a); _interactStateHook.Activate(); });
-        Hook(scanner, SigPlacementActivate, "PlacementActivate", "interaction log off", a => { _placementActivateHook = _hooks.CreateHook<QuestActionFn>(OnPlacementActivate, a); _placementActivateHook.Activate(); });
     }
 
     // ------------------------------------------------------------- tutorials
@@ -179,45 +163,6 @@ public partial class Mod
         catch { }
         try { return _setTutorialHook.OriginalFunction(self, a2, a3, a4); }
         finally { if (forced) try { Marshal.WriteByte(self + TutorialAlsoOnline, 0); } catch { } }
-    }
-
-    // ------------------------------------------------- interaction log only
-
-    private bool InteractLogDue()
-    {
-        if (!NetOnline() || !IsStory(_lastQuestId)) return false;
-        var now = _clock.ElapsedMilliseconds;
-        if (now - _interactLogWindow > 60_000) { _interactLogWindow = now; _interactLogCount = 0; }
-        return ++_interactLogCount <= 40;   // at most 40 lines a minute
-    }
-
-    private nint OnInteractPress(nint self, nint a2, nint a3, nint a4)
-    {
-        var r = _interactPressHook.OriginalFunction(self, a2, a3, a4);
-        try { if (InteractLogDue()) Write($"INTERACT: interact pressed on this PC ({(_isLeader ? "host" : "guest")})   quest={Categorise(_lastQuestId)}"); } catch { }
-        return r;
-    }
-
-    private nint OnInteractSetState(nint comp, nint state, nint ok, nint a4)
-    {
-        var r = _interactStateHook.OriginalFunction(comp, state, ok, a4);
-        try { if ((int)state == 3 && InteractLogDue()) Write($"INTERACT: target set to 'interact requested' (ok={(byte)ok}) on this PC ({(_isLeader ? "host" : "guest")})   quest={Categorise(_lastQuestId)}"); } catch { }
-        return r;
-    }
-
-    private nint OnPlacementActivate(nint placement, nint a2, nint a3, nint a4)
-    {
-        try
-        {
-            if (placement != 0 && InteractLogDue() && Readable(placement + 0x220, 8))
-            {
-                var p = Marshal.ReadIntPtr(placement + 0x220);
-                var id = p != 0 && Readable(p, 8) ? (ulong)Marshal.ReadInt64(p) : 0;
-                Write($"INTERACT: world object {id} became interactable on this PC ({(_isLeader ? "host" : "guest")})   quest={Categorise(_lastQuestId)}");
-            }
-        }
-        catch { }
-        return _placementActivateHook.OriginalFunction(placement, a2, a3, a4);
     }
 
     private void Hook(IStartupScanner scanner, string sig, string name, string missNote, Action<nint> create)
@@ -244,12 +189,12 @@ public partial class Mod
         {
             if (CrewFixApplies() && !t_crewScope)
             {
-                if (_crewQuest != _lastQuestId) { Array.Clear(_crewEntity); _crewQuest = _lastQuestId; }
+                if (_crewQuest != _lastQuestId) { Array.Clear(_crewEntity); Array.Clear(_crewHandle); _crewQuest = _lastQuestId; }
                 var occupied = 0;
                 for (int i = 0; i < 4; i++)
                 {
                     var e = Marshal.ReadIntPtr(_partyArrayAddr + i * 8);
-                    if (e != 0 && e != _crewEntity[i]) occupied |= 1 << i;   // ours stay swappable
+                    if (e != 0 && !IsOurCrew(i, e)) occupied |= 1 << i;   // ours stay swappable
                 }
                 if (SetCrewGate(lifted: true))
                 {
@@ -277,8 +222,20 @@ public partial class Mod
                             Write("CREW: could not put the game's code back after a party step; crew join turned off for this session");
                         }
                     }
+                    var player = Marshal.ReadIntPtr(_partyArrayAddr);
                     for (int i = 1; i < 4; i++)
-                        if ((t_spawned & 1 << i) != 0) _crewEntity[i] = Marshal.ReadIntPtr(_partyArrayAddr + i * 8);
+                    {
+                        if ((t_spawned & 1 << i) == 0) continue;
+                        var e = Marshal.ReadIntPtr(_partyArrayAddr + i * 8);
+                        if (e == 0 || e == player)
+                        {
+                            // Should never happen: the game hands back the player's own character when a slot is taken.
+                            _crewEntity[i] = 0; _crewHandle[i] = default;
+                            Write($"CREW: slot {i} did not get its own character; not treating it as crew   quest={Categorise(_lastQuestId)}");
+                            continue;
+                        }
+                        _crewEntity[i] = e; _crewHandle[i] = SlotHandle(i);
+                    }
                     if (t_spawned != 0 || t_kept != 0)
                         Write($"CREW: story party step online: spawned {Bits(t_spawned)} into empty slot(s), kept {Bits(t_kept)} as they were   quest={Categorise(_lastQuestId)}");
                 }
@@ -286,6 +243,17 @@ public partial class Mod
             }
         }
     }
+
+    private (int idx, long rec, long gen) SlotHandle(int slot)
+    {
+        if (_partyHandlesAddr == 0 || !Readable(_partyHandlesAddr + slot * 0x18, 0x18)) return default;
+        var at = _partyHandlesAddr + slot * 0x18;
+        return (Marshal.ReadInt32(at), Marshal.ReadInt64(at + 8), Marshal.ReadInt64(at + 0x10));
+    }
+
+    /// <summary>The character in a slot is the one this mod spawned there (same pointer and same spawn handle).</summary>
+    private bool IsOurCrew(int slot, nint entity) =>
+        entity != 0 && entity == _crewEntity[slot] && (_partyHandlesAddr == 0 || SlotHandle(slot) == _crewHandle[slot]);
 
     private static string Bits(int mask)
     {

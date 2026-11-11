@@ -25,12 +25,15 @@ public static class RelayCodec
 
     public const byte FlagFromLeader = 1;
 
-    public const byte TypeHello = 1;      // payload: none (presence, every 20 s)
+    public const byte TypeHello = 1;      // payload: none, or flags u8 (bit 0: sender owns the lobby); presence, every 20 s
     public const byte TypeSkipCut = 2;    // payload: quest u32
     public const byte TypeSkipStage = 3;  // payload: quest u32
     public const byte TypeReady = 4;      // payload: chapter-select key u32
     public const byte TypeWaiting = 5;    // payload: chapter-select key u32
     public const byte TypeSignal = 6;     // payload: quest u32, signal hash low 32 bits u32
+    public const byte TypeInteract = 7;   // payload: object net id u64, pressing player net id u64 (guest -> host)
+
+    public const byte HelloOwnsLobby = 1;
 
     public static bool IsRelayId(int id)
     {
@@ -68,6 +71,8 @@ public static class RelayCodec
 
     public static byte[] U32(uint v) => new[] { (byte)v, (byte)(v >> 8), (byte)(v >> 16), (byte)(v >> 24) };
     public static byte[] U32(uint a, uint b) { var r = new byte[8]; U32(a).CopyTo(r, 0); U32(b).CopyTo(r, 4); return r; }
+    public static byte[] U64(ulong a, ulong b) { var r = new byte[16]; for (int i = 0; i < 8; i++) { r[i] = (byte)(a >> (8 * i)); r[8 + i] = (byte)(b >> (8 * i)); } return r; }
+    public static ulong ReadU64(byte[] p, int at) => ReadU32(p, at) | (ulong)ReadU32(p, at + 4) << 32;
     public static uint ReadU32(byte[] p, int at) => (uint)(p[at] | p[at + 1] << 8 | p[at + 2] << 16 | p[at + 3] << 24);
 
     public sealed record Frame(byte Flags, byte Type, byte[] Payload)
