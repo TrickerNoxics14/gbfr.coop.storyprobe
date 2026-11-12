@@ -65,9 +65,14 @@ These are real and currently unsolved:
   the game window in front) to unlock your controls; see below. If the HUD
   stays hidden or the scene still doesn't move on, the other player has to
   finish the part, or quit and restart it.
-- **Chapter 4 cannot be finished online.** The parts load together, but the
-  chapter never completes. Move on by picking the next chapter from Chapter
-  Select.
+- **Chapter 4's last part did not finish online** (the one two-PC test, in
+  0.20, long before most of today's fixes). Its first two parts (the church
+  and the ship) finished and carried both players; the mission after them
+  ended early with the host and guest 34 seconds apart, and the log could not
+  say why. It has not been tried since. Since 0.30 the log records what a
+  stalled step was waiting for (`WAIT`, `STALL`, `STORY SCRIPT`), so one more
+  try tells the cause. If it stalls, move on by picking the next chapter from
+  Chapter Select.
 - **Guests talking to story NPCs (new in 0.28, not yet seen in play).**
   Before 0.28 only the lobby host could use Rackam, "Speak with…" or Depart.
   The game already lets a guest's press ask the host to run it, but in story
@@ -326,7 +331,12 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **MENU** — the Main Menu was opened online in a story area and built the
   full way.
 - **TUTORIAL** — story tutorials are being shown online in this part.
-- **INTERACT** — online only, at most 40 a minute. Guest: a story object
+- **WAIT** — a story step has waited 45 seconds or more for the same signal
+  (the signal's number, once per step, and whether this PC is host or guest).
+- **STALL** — when a part ends, the signal steps that were still waiting.
+- **STORY SCRIPT** — the part's own clear-quest or game-over action ran on
+  this PC, so a defeat can be told apart from a stall.
+- **INTERACT** — online only, at most 25 a minute. Guest: a story object
   opened to this guest, a press sent to the host, or a press that could not
   be sent (the object has no network id). Host: a guest's press ran here, or
   was ignored (the object was not ready here yet, or the player is not known
@@ -462,6 +472,11 @@ network interface exactly as C::Interact does (online state 3, local index not
 is ready, repeats every 3 s for 90 s and then every 30 s. A guest's game
 handles it with its own code (receiver 0xAE64F0 sets +0x235 for ids it
 knows), so no mod is needed on the guest. The host writes nothing else.
+
+Since 0.30, log only: the game's signal-wait check (RVA 0x321A4F0, already
+watched by the signal relay) notes when each step started waiting; the quest
+end hook lists steps still waiting; the story script's clear-quest (RVA
+0x3200D70) and game-over (0x3204200) actions are logged and run unchanged.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.

@@ -683,7 +683,10 @@ public partial class Mod
         {
             try { InjectRelayed(listener); } catch { }
         }
-        return _recvEvalHook.OriginalFunction(listener);
+        var result = _recvEvalHook.OriginalFunction(listener);
+        // Log-only: a step that passed is no longer waiting (the game reads AL only).
+        try { NoteWaiter(listener, _clock.ElapsedMilliseconds, finished: (byte)result != 0); } catch { }
+        return result;
     }
 
     private void InjectRelayed(nint listener)

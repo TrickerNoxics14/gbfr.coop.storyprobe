@@ -817,6 +817,7 @@ public partial class Mod : IMod
         RegisterRelayScans(scanner);
         RegisterCoopFixScans(scanner);
         RegisterInteractScans(scanner);
+        RegisterDiagScans(scanner);
 
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
@@ -1383,6 +1384,7 @@ public partial class Mod : IMod
     private nint OnQuestEnd(nint questSys, nint a2, nint a3, nint a4, nint a5, nint a6, nint a7, nint a8)
     {
         var quest = _lastQuestId;
+        try { LogStallAtQuestEnd(_clock.ElapsedMilliseconds); } catch { }
         try
         {
             var state = Marshal.ReadInt32(questSys + QuestSysReplayState);
