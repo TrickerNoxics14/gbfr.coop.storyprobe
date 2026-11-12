@@ -269,18 +269,22 @@ public partial class Mod
                 // The lobby-owner bit in HELLO: re-announce at once when it changes.
                 _lastOwnerCheckMs = now;
                 var (_, owns) = LobbyOwnership();
-                if (owns != _ownsLobbySent) _lastHelloSent = -100_000;
+                if (owns != _ownsLobbySent || VoteSupported() != _votesSent) _lastHelloSent = -100_000;
             }
             if (_relayActive && now - _lastHelloSent > 20_000)
             {
                 _lastHelloSent = now;
                 var (_, ownsLobby) = LobbyOwnership();
                 _ownsLobbySent = ownsLobby;
-                Send(RelayCodec.TypeHello, new[] { ownsLobby ? RelayCodec.HelloOwnsLobby : (byte)0 });
+                _votesSent = VoteSupported();
+                Send(RelayCodec.TypeHello, new[] { (byte)((ownsLobby ? RelayCodec.HelloOwnsLobby : 0) | (_votesSent ? RelayCodec.HelloVotes : 0)) });
             }
             FlushOutbox(now);
             PumpCutSkip(now);
             PumpReady(now);
+            PumpProgress(now);
+            PumpSkipVote(now);
+            PumpStatus(now);
             PumpOpenLater(now);
             PumpAnnounce(now);
         }
@@ -303,7 +307,7 @@ public partial class Mod
                 ? $"RELAY: on (this PC is {(_isLeader ? "the host" : "a guest")}, player slot {slot})"
                 : "RELAY: off (not in an online session)");
             if (active) _lastHelloSent = -100_000;
-            else { lock (_relayLock) { Array.Clear(_peerSeen); Array.Clear(_peerOwner); _outbox.Clear(); } ForgetOpened(); }
+            else { lock (_relayLock) { Array.Clear(_peerSeen); Array.Clear(_peerOwner); _outbox.Clear(); } ForgetOpened(); Array.Clear(_peerVote); Array.Clear(_peerVotes); _voteSince = 0; ClearStatus("1ready", "2progress", "3note", "4skip"); Array.Clear(_peerProgress); _myProgress = default; _mismatchSeen = (0, 0); _progressAck = 0; _loggedMismatch = 0; }
         }
     }
 
@@ -374,9 +378,10 @@ public partial class Mod
             {
                 case RelayCodec.TypeHello:
                     var fresh = _peerSeen[from] == 0 || now - _peerSeen[from] > PeerAliveMs;
-                    if (fresh) _peerReady[from] = (0, 0);   // a slot reused by someone new starts not ready
+                    if (fresh) { _peerReady[from] = (0, 0); _peerProgress[from] = default; _peerVote[from] = default; }   // a slot reused by someone new starts clean
                     _peerSeen[from] = Math.Max(1, now); _peerLeader[from] = f.FromLeader;   // 0 means "never"
                     _peerOwner[from] = p.Length >= 1 && (p[0] & RelayCodec.HelloOwnsLobby) != 0;
+                    _peerVotes[from] = p.Length >= 1 && (p[0] & RelayCodec.HelloVotes) != 0;
                     if (fresh)
                     {
                         Write($"RELAY: player slot {from} has the mod{(f.FromLeader ? " (host)" : "")}");
@@ -392,6 +397,12 @@ public partial class Mod
                 case RelayCodec.TypeReady when p.Length >= 4 && _isLeader:
                     _peerReady[from] = (RelayCodec.ReadU32(p, 0), Math.Max(1, now));
                     Write($"READY: player slot {from} is ready (Chapter Select key 0x{RelayCodec.ReadU32(p, 0):X})");
+                    break;
+                case RelayCodec.TypeProgress:
+                    OnProgressFrame(from, p, now);
+                    break;
+                case RelayCodec.TypeSkipVote:
+                    OnVoteFrame(from, p, now);
                     break;
                 case RelayCodec.TypeWaiting when f.FromLeader && p.Length >= 4 && !_isLeader:
                     Write($"READY: the host is waiting for you: pick the same Chapter Select part (key 0x{RelayCodec.ReadU32(p, 0):X})");
@@ -420,7 +431,7 @@ public partial class Mod
         var cut = Marshal.ReadIntPtr(_cutPlayerPtr);
         if (cut == 0 || Marshal.ReadByte(cut + CutActive) == 0) return false;
         var mode = Marshal.ReadInt32(cut + CutMode);
-        return mode == 1 || mode == 5;
+        return mode == 1 || mode == 3;   // the game's own "a cutscene is playing" test (2.0.6 +0x6461D0): mode 1 or 3
     }
 
     /// <summary>Guest: perform a relayed movie/event skip, once, only while one plays.</summary>
@@ -518,7 +529,7 @@ public partial class Mod
     /// <summary>True when the mod took over the jump (held or turned into a ready answer).</summary>
     private bool DecideChapterJump(nint self, nint arg)
     {
-        if (!_readyCheck || !_relayActive || _uiMgrPtr == 0) return false;
+        if ((!_readyCheck && !_warnProgress) || !_relayActive || _uiMgrPtr == 0) return false;
         if (Marshal.ReadByte(self + 0x30) != 0) return false;   // "replay the previous part": not a pick
         var ui = Marshal.ReadIntPtr(_uiMgrPtr);
         if (ui == 0) return false;
@@ -527,12 +538,14 @@ public partial class Mod
 
         if (!_isLeader)
         {
+            if (!_readyCheck) return false;
             var hostHasMod = false;
             for (int i = 0; i < 4; i++) if (i != _localSlot && _peerLeader[i] && PeerAlive(i, now)) hostHasMod = true;
             if (!hostHasMod) return false;
             Send(RelayCodec.TypeReady, RelayCodec.U32(key));
             _guestWaitSince = Math.Max(1, now); _guestWaitKey = key; _guestWaitQuest = _lastQuestId;
             Write($"READY: told the host you are ready (Chapter Select key 0x{key:X}); waiting for the host to start");
+            SetStatus("1ready", "You are ready. Waiting for the host to start...");
             return true;
         }
 
@@ -542,9 +555,25 @@ public partial class Mod
             // without the others (the game's own jump runs). Another part:
             // that pick replaces the held one.
             var same = key == _heldKey;
-            DropHeld();
-            if (same) { Write("READY: host picked the same part again, starting without waiting"); return false; }
+            var wasProgress = _heldForProgress;
+            DropHeld(keepReady: wasProgress && same);   // the guests' ready answers stay valid while the host confirms
+            if (same && wasProgress)
+            {
+                // Confirmed: the saves differ and the host still wants this part. Go on to the ready check.
+                _progressAck = MismatchSignature(now);
+                Write("PROGRESS: host picked the same part again, starting anyway");
+            }
+            else if (same) { Write("READY: host picked the same part again, starting without waiting"); return false; }
         }
+        if (_warnProgress)
+        {
+            var heldCopy = Marshal.AllocHGlobal(0x80);
+            for (int i = 0; i < 0x80; i += 8) Marshal.WriteInt64(heldCopy, i, i < 0x40 ? Marshal.ReadInt64(self + i) : 0);
+            Marshal.WriteByte(heldCopy + 0x30, 0);
+            if (HoldForProgress(heldCopy, arg, key, now)) return true;
+            Marshal.FreeHGlobal(heldCopy);
+        }
+        if (!_readyCheck) return false;
         var waiting = GuestsNotReady(key, now);
         if (waiting.total == 0) return false;               // nobody else runs the mod
         if (waiting.notReady == 0) { Write("READY: everyone is ready, starting"); ClearReady(); return false; }
@@ -555,6 +584,7 @@ public partial class Mod
         _heldJump = copy; _heldJumpArg = arg; _heldKey = key; _heldSince = now; _heldQuest = _lastQuestId;
         Send(RelayCodec.TypeWaiting, RelayCodec.U32(key));
         Write($"READY: waiting for {waiting.notReady} of {waiting.total} player(s) to pick the same part (key 0x{key:X}); 60 s");
+        SetStatus("1ready", $"Waiting for {waiting.notReady} of {waiting.total} player(s) to pick the same part (60 s)");
         return true;
     }
 
@@ -584,7 +614,7 @@ public partial class Mod
                 Write("READY: the session or area changed while waiting; cancelled");
                 DropHeld(); FadeBackIn();
             }
-            else if (w.notReady == 0)
+            else if (w.notReady == 0 && !_heldForProgress)
             {
                 Write(w.total == 0 ? "READY: nobody left to wait for, starting" : "READY: everyone is ready, starting");
                 ReleaseHeld();
@@ -598,10 +628,10 @@ public partial class Mod
         if (_guestWaitSince != 0)
         {
             if (_lastQuestId != _guestWaitQuest)
-                _guestWaitSince = 0;          // the host started and the game pulled this PC in
+            { _guestWaitSince = 0; ClearStatus("1ready"); }          // the host started and the game pulled this PC in
             else if (now - _guestWaitSince > ReadyTimeoutMs || !_relayActive)
             {
-                _guestWaitSince = 0;
+                _guestWaitSince = 0; ClearStatus("1ready");
                 Write("READY: the host did not start in time; you are back in town");
                 FadeBackIn();
             }
@@ -611,7 +641,7 @@ public partial class Mod
     private void ReleaseHeld()
     {
         var copy = _heldJump; var arg = _heldJumpArg; var key = _heldKey;
-        _heldJump = 0;
+        _heldJump = 0; ClearStatus("1ready", "2progress");
         ClearReady();
         var ui = Marshal.ReadIntPtr(_uiMgrPtr);
         if (ui != 0) Marshal.WriteInt32(ui + UiSelectedChapter, (int)key);
@@ -619,12 +649,15 @@ public partial class Mod
         // The copy is not freed: the game might keep the pointer for the frame.
     }
 
-    private void DropHeld() { _heldJump = 0; ClearReady(); }
+    private void DropHeld(bool keepReady = false) { _heldJump = 0; _heldForProgress = false; if (!keepReady) ClearReady(); ClearStatus("1ready", "2progress"); }
+
+    private nint _fadeBlock;
 
     private void FadeBackIn()
     {
+        ClearStatus("1ready", "2progress");
         if (_fadeIn == null) return;
-        var fake = Marshal.AllocHGlobal(0x80);
+        var fake = _fadeBlock != 0 ? _fadeBlock : (_fadeBlock = Marshal.AllocHGlobal(0x80));   // one block, reused
         for (int i = 0; i < 0x80; i += 8) Marshal.WriteInt64(fake, i, 0);
         Marshal.WriteInt32(fake + 0x30, 20);   // frames
         Marshal.WriteInt32(fake + 0x40, 0);    // black
@@ -717,7 +750,7 @@ public partial class Mod
         if (!_relayActive) return "off";
         var now = _clock.ElapsedMilliseconds; var peers = 0;
         for (int i = 0; i < 4; i++) if (i != _localSlot && PeerAlive(i, now)) peers++;
-        return $"{(_isLeader ? "host" : "guest")},peers={peers},pump={Interlocked.Read(ref _pumpCalls)}";
+        return $"{(_isLeader ? "host" : "guest")},peers={peers},pump={Interlocked.Read(ref _pumpCalls)},saves={ProgressSummary(now)}";
     }
 
     private void RelayError(string where, Exception ex)

@@ -44,6 +44,13 @@ mismatched saves you get:
 With matched saves, the same mission loaded on both clients within **3 seconds**
 of each other and played normally.
 
+**Since 0.31 the mod warns you.** With the mod on both PCs, each one reads how
+many story quests its own save has cleared and shares that number (and a short
+fingerprint of which ones) with the other players. When they differ, the host
+sees a note ("Heads up: your story save differs from player slot 2's") and the
+Chapter Select start is held once, with the reason on screen. Pick the same
+part again to start anyway. Turn it off with `WarnStoryProgressMismatch`.
+
 ---
 
 ## Known limitations
@@ -208,7 +215,10 @@ controls" routine for your characters, the same one the story scripts use.
   "SpawnCrewOnline": true,
   "FullMainMenuOnline": true,
   "TutorialsOnline": true,
-  "GuestInteractOnline": true
+  "GuestInteractOnline": true,
+  "WarnStoryProgressMismatch": true,
+  "StatusTextOnScreen": true,
+  "SkipVoteOnline": false
 }
 ```
 
@@ -229,6 +239,24 @@ controls" routine for your characters, the same one the story scripts use.
   the game does.
 - `GuestInteractOnline`: set to `false` to go back to "only the host can talk
   to story NPCs". It also stops the guest's press being sent to the host.
+- `WarnStoryProgressMismatch`: set to `false` to stop reading and sharing your
+  story progress and to never hold a start because the saves differ.
+- `SkipVoteOnline` (**off by default**): set to `true` on every PC to let guests
+  vote to skip movie and event cutscenes. A guest's confirmed skip is then sent
+  to the host and the guest keeps watching ("You voted to skip. Waiting for
+  the others..."). When **more than half** of the players with the mod have
+  voted, the host skips for everyone. In a two-player lobby a lone guest is
+  not a majority, so the host still decides (it sees "1 of 1 other player(s)
+  want to skip"). The host's own confirmed skip still skips for everyone at
+  once. A guest who confirms skip a second time within 10 seconds skips only
+  on their own PC. In-engine scenes are not voted on: only the host's skip is
+  passed on, as before. Needs `LeaderSkipsForEveryone` on.
+- `StatusTextOnScreen`: set to `false` to hide the small text box the mod
+  shows at the top of the game window ("Waiting for 1 of 1 player to pick the
+  same part", "Story saves differ ..."). The box is a separate window: it never
+  takes focus, never catches a click or key, and only shows while the game is
+  the active window (it does not show in exclusive full screen; use
+  borderless or windowed).
 
 All but the first are on if their line is missing, so older config files get
 them too.
@@ -336,6 +364,12 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **STALL** — when a part ends, the signal steps that were still waiting.
 - **STORY SCRIPT** — the part's own clear-quest or game-over action ran on
   this PC, so a defeat can be told apart from a stall.
+- **SKIP VOTE** — a guest voted to skip a cutscene, confirmed twice and skipped
+  on this PC only, or the host skipped for everyone because enough players
+  voted.
+- **PROGRESS** — your story save differs from another player's (both
+  numbers), or the host's start was held because of it and what to do.
+  The heartbeat also shows `saves=<cleared>/diff=<players that differ>`.
 - **INTERACT** — online only, at most 25 a minute. Guest: a story object
   opened to this guest, a press sent to the host, or a press that could not
   be sent (the object has no network id). Host: a guest's press ran here, or
@@ -369,11 +403,15 @@ What this mod does and does not do, so you don't have to take it on trust:
     through the game's own sender; the mod opens no connection itself.
   - "I pressed this object" from a guest (since 0.28): the game's own
     in-session numbers for the object and for the guest's character, the same
-    two numbers the game itself sends for that press.
+    two numbers the game itself sends for that press,
+  - "I voted to skip this cutscene" (since 0.31, only with `SkipVoteOnline`):
+    the quest number, re-sent every second while the vote stands,
+  - how far your save is (since 0.31): the number of story quests it has
+    cleared and a short fingerprint of which ones. Nothing else from the save.
 
   No names, Steam IDs, email, IP address, account data or file contents are
   ever sent. Turn all of it off with the three options in Configuration, plus
-  `GuestInteractOnline`.
+  `GuestInteractOnline`, `WarnStoryProgressMismatch` and `SkipVoteOnline`.
 - **It never reads your personal information.** No Steam ID, email, IP
   address or account data. It does not touch the registry or start other
   programs.
@@ -477,6 +515,21 @@ Since 0.30, log only: the game's signal-wait check (RVA 0x321A4F0, already
 watched by the signal relay) notes when each step started waiting; the quest
 end hook lists steps still waiting; the story script's clear-quest (RVA
 0x3200D70) and game-over (0x3204200) actions are logged and run unchanged.
+
+Since 0.31: the quest system's story records (global at RVA 0x7C53D30, record
+list +0x108..+0x110, 0xD48 bytes each, cleared count at +8) are read, never
+written. The mod's Chapter Select start hold (RVA 0x1BE8970) now also holds
+once when the saves differ. The status text box is an ordinary operating
+system window created by the mod (not part of the game's drawing); the game
+itself is not changed.
+
+Since 0.31, only with `SkipVoteOnline`: on a guest, a confirmed skip of a movie or
+event cutscene is taken as a vote and the game's own skip (the SkipCut action,
+RVA 0x1BECE50, which only copies a byte to the cutscene HUD) does not run; on
+the host, when enough votes are in, the same HUD byte (+0x46) is written, which
+is what a guest's relayed skip already did. The cutscene-playing test used by
+the relayed skip now matches the game's own (RVA 0x6461D0: mode 1 or 3; it was
+1 or 5, which could miss a movie played in mode 3).
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.

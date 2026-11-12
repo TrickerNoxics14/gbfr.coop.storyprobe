@@ -539,6 +539,11 @@ public partial class Mod : IMod
     private static readonly Regex FullMenuFalse = OptionFalse("FullMainMenuOnline");
     private static readonly Regex TutorialsFalse = OptionFalse("TutorialsOnline");
     private static readonly Regex GuestInteractFalse = OptionFalse("GuestInteractOnline");
+    private static readonly Regex WarnProgressFalse = OptionFalse("WarnStoryProgressMismatch");
+    private static readonly Regex StatusOverlayFalse = OptionFalse("StatusTextOnScreen");
+
+    private static readonly Regex SkipVoteTrue = new(
+        "\"SkipVoteOnline\"\\s*:\\s*true", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     private static readonly Regex UnlockTrue = new(
         "\"UnlockStoryWhileOnline\"\\s*:\\s*true",
@@ -818,6 +823,7 @@ public partial class Mod : IMod
         RegisterCoopFixScans(scanner);
         RegisterInteractScans(scanner);
         RegisterDiagScans(scanner);
+        RegisterProgressScans(scanner);
 
         // Its own fast timer: a key press lasts a fraction of a second, far
         // shorter than the 3 s tick.
@@ -1125,12 +1131,12 @@ public partial class Mod : IMod
             bool wanted;
             var skipTown = true;
             var keepSession = true;
-            bool leaderSkip = true, readyCheck = true, relaySignals = true, spawnCrew = true, fullMenu = true, tutorials = true, guestInteract = true;
+            bool leaderSkip = true, readyCheck = true, relaySignals = true, spawnCrew = true, fullMenu = true, tutorials = true, guestInteract = true, warnProgress = true, statusOverlay = true, skipVote = false;
             if (!File.Exists(_configPath))
             {
                 // Default ON: unlocking the gate is the point of the mod, and it
                 // means a second machine works after a plain copy, with no edit.
-                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true,\n  \"LeaderSkipsForEveryone\": true,\n  \"ReadyCheckOnline\": true,\n  \"RelayStorySignals\": true,\n  \"SpawnCrewOnline\": true,\n  \"FullMainMenuOnline\": true,\n  \"TutorialsOnline\": true,\n  \"GuestInteractOnline\": true\n}\n");
+                File.WriteAllText(_configPath, "{\n  \"UnlockStoryWhileOnline\": true,\n  \"SkipTownPartsOnline\": true,\n  \"KeepSessionOnReturnToTown\": true,\n  \"LeaderSkipsForEveryone\": true,\n  \"ReadyCheckOnline\": true,\n  \"RelayStorySignals\": true,\n  \"SpawnCrewOnline\": true,\n  \"FullMainMenuOnline\": true,\n  \"TutorialsOnline\": true,\n  \"GuestInteractOnline\": true,\n  \"WarnStoryProgressMismatch\": true,\n  \"StatusTextOnScreen\": true,\n  \"SkipVoteOnline\": false\n}\n");
                 _configStamp = File.GetLastWriteTimeUtc(_configPath);
                 wanted = true;
             }
@@ -1152,6 +1158,9 @@ public partial class Mod : IMod
                 fullMenu = !FullMenuFalse.IsMatch(text);
                 tutorials = !TutorialsFalse.IsMatch(text);
                 guestInteract = !GuestInteractFalse.IsMatch(text);
+                warnProgress = !WarnProgressFalse.IsMatch(text);
+                statusOverlay = !StatusOverlayFalse.IsMatch(text);
+                skipVote = SkipVoteTrue.IsMatch(text);
             }
 
             if (skipTown != _skipTownParts || !_unlockLogged)
@@ -1169,10 +1178,10 @@ public partial class Mod : IMod
                 _leaderSkip = leaderSkip; _readyCheck = readyCheck; _relaySignals = relaySignals;
                 Write($"config: LeaderSkipsForEveryone = {leaderSkip}, ReadyCheckOnline = {readyCheck}, RelayStorySignals = {relaySignals}");
             }
-            if (spawnCrew != _spawnCrewOnline || fullMenu != _fullMenuOnline || tutorials != _tutorialsOnline || guestInteract != _guestInteract || !_unlockLogged)
+            if (spawnCrew != _spawnCrewOnline || fullMenu != _fullMenuOnline || tutorials != _tutorialsOnline || guestInteract != _guestInteract || warnProgress != _warnProgress || statusOverlay != _statusOverlay || skipVote != _skipVote || !_unlockLogged)
             {
-                _spawnCrewOnline = spawnCrew; _fullMenuOnline = fullMenu; _tutorialsOnline = tutorials; _guestInteract = guestInteract;
-                Write($"config: SpawnCrewOnline = {spawnCrew}, FullMainMenuOnline = {fullMenu}, TutorialsOnline = {tutorials}, GuestInteractOnline = {guestInteract}");
+                _spawnCrewOnline = spawnCrew; _fullMenuOnline = fullMenu; _tutorialsOnline = tutorials; _guestInteract = guestInteract; _warnProgress = warnProgress; _statusOverlay = statusOverlay; _skipVote = skipVote;
+                Write($"config: SpawnCrewOnline = {spawnCrew}, FullMainMenuOnline = {fullMenu}, TutorialsOnline = {tutorials}, GuestInteractOnline = {guestInteract}, WarnStoryProgressMismatch = {warnProgress}, StatusTextOnScreen = {statusOverlay}, SkipVoteOnline = {skipVote}");
             }
 
             lock (_patchLock)
@@ -1452,6 +1461,8 @@ public partial class Mod : IMod
 
     private void OnSkipCut(nint self, nint arg)
     {
+        // Vote to skip (off by default): a guest's confirmed skip is a vote, not a local skip.
+        try { if (TakeSkipAsVote(self)) return; } catch (Exception ex) { RelayError("skip vote", ex); }
         try
         {
             OpenSkipWindow();

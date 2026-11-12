@@ -31,9 +31,12 @@ public static class RelayCodec
     public const byte TypeReady = 4;      // payload: chapter-select key u32
     public const byte TypeWaiting = 5;    // payload: chapter-select key u32
     public const byte TypeSignal = 6;     // payload: quest u32, signal hash low 32 bits u32
+    public const byte TypeSkipVote = 9;   // payload: quest u32 (guest -> host: "I confirmed a skip of this cutscene", re-sent each second)
+    public const byte TypeProgress = 8;   // payload: story quests cleared u32, fingerprint u32 (everyone, every 20 s and on change)
     public const byte TypeInteract = 7;   // payload: object net id u64, pressing player net id u64 (guest -> host)
 
     public const byte HelloOwnsLobby = 1;
+    public const byte HelloVotes = 2;       // the sender has SkipVoteOnline on (and host skip sharing)
 
     public static bool IsRelayId(int id)
     {
