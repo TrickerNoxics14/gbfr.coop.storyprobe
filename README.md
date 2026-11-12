@@ -76,6 +76,14 @@ These are real and currently unsolved:
   everyone moves on together. The host still decides: a press only runs if
   the object is ready on the host's game too. If it does nothing, let the host
   do it. Turn it off with `GuestInteractOnline`. The log line is `INTERACT`.
+  **New in 0.29 (not yet seen in play):** a guest WITHOUT the mod (for
+  example a console player) can now use story objects too, as long as the
+  **host** has the mod. The game tells guests "this object is ready" only once,
+  and a guest that had not set the object up yet never hears it. The host's mod
+  now says it again (the game's own message, every few seconds for the first
+  minute and a half, then rarely) for every story object that is ready on the
+  host. The guest's own game then shows the prompt, and its press reaches the
+  host as the game's normal request, which the same host check handles.
 - **Two ship Departs lead into a town section: Chapter 6 and Chapter 8.**
   Online, only the host would go there. Since 0.24 the mod skips those town
   sections while you're in a session: in Chapter 8 the Depart goes straight to
@@ -346,6 +354,9 @@ What this mod does and does not do, so you don't have to take it on trust:
   - "I'm ready for this Chapter Select part" (with the part's number),
   - a story signal number from the host's game (the game's own internal number
     for a story step),
+  - "this object is ready" from the host (since 0.29): the game's own
+    message with the object's in-session number, repeated for a while. It goes
+    through the game's own sender; the mod opens no connection itself.
   - "I pressed this object" from a guest (since 0.28): the game's own
     in-session numbers for the object and for the guest's character, the same
     two numbers the game itself sends for that press.
@@ -439,6 +450,18 @@ in any area (the game would otherwise run it with no player and crash); in
 story areas a press on an object that is not enabled on the host is dropped,
 and the same press arriving twice (the game's copy and the mod's) runs once.
 A relayed press is handed to that same receiver as the game's own request.
+
+Since 0.29, on the lobby owner, online in story areas only: for every Interact
+object whose start has finished on the host (callback field +0x310 empty, state
+not 5 or 6) and whose interactable is enabled (found by the game's own handle
+check, never through the stored +0x3E8), the mod builds the game's own
+announcement byte for byte (network type 10, subtype 1, size 0x68, reliable,
+count at +0x10, ids from +0x18, at most ten) and sends it through the game's
+network interface exactly as C::Interact does (online state 3, local index not
+-1, interface object +0x38, slot 0x80). It first goes out 1 s after the object
+is ready, repeats every 3 s for 90 s and then every 30 s. A guest's game
+handles it with its own code (receiver 0xAE64F0 sets +0x235 for ids it
+knows), so no mod is needed on the guest. The host writes nothing else.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.

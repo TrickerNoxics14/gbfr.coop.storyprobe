@@ -26,6 +26,13 @@ namespace gbfr.coop.storyprobe;
 ///    network id. The guest's mod also sends the same request over the relay;
 ///    the host's mod hands it to the game's own receiver.
 ///
+/// 3. <b>The host says it again (0.29, for guests WITHOUT the mod).</b> The host
+///    announces an object to the guests once (network type 10 / 1, the object's
+///    id) and a guest that had not set the object up yet never hears it. The
+///    host's mod repeats that same message for every Interact object that is
+///    ready on the host, so any guest, modded or not (a console player), gets
+///    the prompt and its press reaches the host as the game's own request.
+///
 /// On the host every request (the game's own or relayed) passes a gate first:
 /// the pressing player must exist on the host (the game's own receiver would
 /// crash otherwise), the object must be ready on the host (enabled), and one
@@ -51,9 +58,13 @@ public partial class Mod
     // Calls and globals read from inside the two functions (same offsets in 2.0.5 and 2.0.6).
     internal const int RecvNetIdCall = 0x2D, RecvEntityTable = 0x3A, RecvCompCall = 0xBF, RecvTailJump = 0x1AA;
     internal const int CInteractLobbyHolder = 0x63, CInteractNetCompCall = 0x151;
+    /// <summary>C::Interact's own network send: <c>mov rax,[net interface]</c>; <c>[rax+0x38]</c> object, its slot 0x80 sends a message.</summary>
+    internal const int CInteractNetIface = 0x256;
+    internal const int CInteractNetIfaceUse = 0x25D;
 
     // Object layout (2.0.5 = 2.0.6).
     private const int PlacementCallback = 0x310, PlacementAllowed = 0x235, PlacementComp = 0x3E8, PlacementId = 0x220;
+    private const int PlacementStatus = 0x134, PlacementMember = 0x200, PlacementLinked = 0x3F0;
     private const int CompEnabled = 0x68;
     private const int EntityHandle = 0x38, EntityGame = 0x70, PlayerNetValid = 0x4358, PlayerNetId = 0x4360, PlayerNetIndex = 0x4368;
 
@@ -90,6 +101,15 @@ public partial class Mod
     private int _openedQuest = -1;
     private const int MaxTracked = 512;
 
+    // Host: Interact objects seen starting this area, and when each was last announced to the guests.
+    internal const int AnnounceBatch = 10, AnnounceTickMs = 1000, AnnounceFirstMs = 1000, AnnounceFastMs = 3000, AnnounceFastForMs = 90_000, AnnounceSlowMs = 30_000;
+    private nint _netIfacePtr;
+    private readonly List<(nint p, ulong id)> _announceObjs = new();
+    private readonly Dictionary<ulong, long> _announceReady = new();   // object id -> first seen ready on this host
+    private readonly Dictionary<ulong, long> _announceLast = new();    // object id -> last announced (ms)
+    private int _announceQuest = -1;
+    private long _announceTickMs = -100_000;
+
     [ThreadStatic] private static nint t_scratch;
     [ThreadStatic] private static bool t_userChecked;
 
@@ -120,6 +140,11 @@ public partial class Mod
             { Write("C::Interact: unexpected code, guest interaction off"); return; }
             _netCompOf = _hooks.CreateWrapper<FromHandleFn>((long)Rip(a, CInteractNetCompCall + 1, CInteractNetCompCall + 5), out _);
             _lobbyHolderPtr = Rip(a, CInteractLobbyHolder + 3, CInteractLobbyHolder + 7);
+            // The game's network interface, read where C::Interact itself sends its request. Only the host announcement needs it.
+            if (Marshal.ReadInt16(a + CInteractNetIface) == unchecked((short)0x8B48) && Marshal.ReadByte(a + CInteractNetIface + 2) == 0x05
+                && Marshal.ReadInt32(a + CInteractNetIfaceUse) == 0x38488B48)
+                _netIfacePtr = Rip(a, CInteractNetIface + 3, CInteractNetIface + 7);
+            else Write("C::Interact: network interface not where expected, host announcement off");
             _cInteractHook = _hooks.CreateHook<CInteractFn>(OnCInteract, a);
             _cInteractHook.Activate();
         });
@@ -255,6 +280,7 @@ public partial class Mod
     {
         var r = _placementActivateHook.OriginalFunction(placement, a2, a3, a4);
         try { OpenForGuest(placement, _clock.ElapsedMilliseconds); } catch (Exception ex) { RelayError("guest interaction", ex); }
+        try { TrackForAnnounce(placement); } catch (Exception ex) { RelayError("host announcement", ex); }
         return r;
     }
 
@@ -360,6 +386,122 @@ public partial class Mod
         _lastGuestSendId = obj; _lastGuestSendMs = now;
         Send(RelayCodec.TypeInteract, RelayCodec.U64((ulong)obj, (ulong)who));
         if (InteractLogDue()) Write($"INTERACT: pressed as a guest; asked the host to run it   quest={Categorise(_lastQuestId)}");
+    }
+
+    // ------------------------------------------- host: say it again to the guests
+
+    /// <summary>The placement's id the way the game announces it (u64 at the record the placement points to); 0 if unreadable.</summary>
+    private static ulong PlacementIdOf(nint p)
+    {
+        var rec = Ptr(p + PlacementId);
+        return rec != 0 && Readable(rec, 8) ? (ulong)Marshal.ReadInt64(rec) : 0;
+    }
+
+    private void ResetAnnounceIfAreaChanged()
+    {
+        if (_announceQuest == _lastQuestId) return;
+        _announceQuest = _lastQuestId; _announceObjs.Clear(); _announceReady.Clear(); _announceLast.Clear();
+    }
+
+    private bool HostAnnounceReady() =>
+        _guestInteract && _netIfacePtr != 0 && _compFromHandle != null && _interactSlot9 != 0 && _lobbyHolderPtr != 0
+        && _netPtr != 0 && _localIndex != null;
+
+    /// <summary>Remembers an Interact object that starts on this PC (the list is only read on the host).</summary>
+    private void TrackForAnnounce(nint p)
+    {
+        if (!HostAnnounceReady() || !IsStory(_lastQuestId) || !NetOnline() || !IsInteractObject(p)) return;
+        var id = PlacementIdOf(p);
+        if (id == 0) return;
+        lock (_interactLock)
+        {
+            ResetAnnounceIfAreaChanged();
+            foreach (var o in _announceObjs) if (o.p == p && o.id == id) return;
+            _announceObjs.RemoveAll(o => o.p == p);   // the address was reused by another object
+            if (_announceObjs.Count < MaxTracked) _announceObjs.Add((p, id));
+        }
+    }
+
+    /// <summary>The object's interactable, found the safe way (the game's own handle check), 0 if there is none.</summary>
+    private nint HostComp(nint p)
+    {
+        if (_compFromHandle == null || !Readable(p, PlacementLinked + 0x18)) return 0;
+        var h = Marshal.ReadInt32(p + PlacementLinked) != 0 ? p + PlacementLinked : p + PlacementMember;
+        return Marshal.ReadInt32(h) == 0 ? 0 : _compFromHandle(h);
+    }
+
+    /// <summary>The same moment the game itself announces an object: its start is done on this PC and its interactable is on.</summary>
+    private bool HostObjectReady(nint p, ulong id)
+    {
+        if (!IsInteractObject(p) || PlacementIdOf(p) != id) return false;
+        if (Marshal.ReadIntPtr(p + PlacementCallback) != 0) return false;                 // still waiting for its own conditions
+        if ((uint)(Marshal.ReadInt32(p + PlacementStatus) - 5) <= 1) return false;        // the game's own "not 5 or 6" test
+        var c = HostComp(p);
+        return c != 0 && Readable(c + CompEnabled, 1) && (Marshal.ReadByte(c + CompEnabled) & 1) != 0;
+    }
+
+    /// <summary>Pump (host): repeat the game's own announcement (network type 10 / 1) for the objects that are ready here.</summary>
+    private void PumpAnnounce(long now)
+    {
+        if (_announceObjs.Count == 0 || now - _announceTickMs < AnnounceTickMs) return;
+        _announceTickMs = now;
+        if (!HostAnnounceReady() || !IsStory(_lastQuestId) || !NetOnline()) return;
+        var (joined, owner) = LobbyOwnership();
+        if (!joined || !owner) return;
+        (nint p, ulong id)[] snap;
+        lock (_interactLock) { ResetAnnounceIfAreaChanged(); snap = _announceObjs.ToArray(); }
+        var due = new List<ulong>();
+        foreach (var (p, id) in snap)
+        {
+            if (!IsInteractObject(p) || PlacementIdOf(p) != id)
+            {
+                // Gone (freed, reused): forget it, so retries of one part never fill the list.
+                lock (_interactLock) { _announceObjs.RemoveAll(o => o.p == p && o.id == id); _announceReady.Remove(id); _announceLast.Remove(id); }
+                continue;
+            }
+            if (!HostObjectReady(p, id)) { lock (_interactLock) _announceReady.Remove(id); continue; }
+            long since, last; bool sentBefore;
+            lock (_interactLock)
+            {
+                if (!_announceReady.TryGetValue(id, out since)) _announceReady[id] = since = now;
+                sentBefore = _announceLast.TryGetValue(id, out last);
+            }
+            if (now - since < AnnounceFirstMs) continue;
+            var period = now - since < AnnounceFastForMs ? AnnounceFastMs : AnnounceSlowMs;
+            if (!sentBefore || now - last >= period) due.Add(id);
+        }
+        for (int i = 0; i < due.Count; i += AnnounceBatch)
+        {
+            var batch = due.GetRange(i, Math.Min(AnnounceBatch, due.Count - i));
+            if (!SendAnnounce(batch)) return;
+            lock (_interactLock)
+                foreach (var id in batch)
+                {
+                    var first = !_announceLast.ContainsKey(id);
+                    _announceLast[id] = now;
+                    if (first && InteractLogDue()) Write($"INTERACT: told the guests about world object {id} (ready on this host)   quest={Categorise(_lastQuestId)}");
+                }
+        }
+    }
+
+    /// <summary>The game's own message, byte for byte as its placement manager builds it: type 10, subtype 1, size 0x68, reliable, count, ids.</summary>
+    private bool SendAnnounce(List<ulong> ids)
+    {
+        var net = Ptr(_netPtr);
+        if (net == 0 || !Readable(net + 4, 4) || Marshal.ReadInt32(net + 4) != 3 || _localIndex(net) == -1) return false;   // the game's own two tests
+        var iface = Ptr(Ptr(_netIfacePtr) + 0x38);
+        if (iface == 0 || ids.Count == 0 || ids.Count > AnnounceBatch) return false;
+        var msg = Marshal.AllocHGlobal(0x68);
+        try
+        {
+            for (int i = 0; i < 0x68; i += 8) Marshal.WriteInt64(msg, i, 0);
+            Marshal.WriteInt32(msg, 0, 10); Marshal.WriteInt32(msg, 4, 1); Marshal.WriteInt32(msg, 8, 0x68); Marshal.WriteByte(msg, 0xC, 1);
+            Marshal.WriteInt32(msg, 0x10, ids.Count);
+            for (int i = 0; i < ids.Count; i++) Marshal.WriteInt64(msg, 0x18 + 8 * i, unchecked((long)ids[i]));
+            _vcall(iface, 0x80, msg);
+            return true;
+        }
+        finally { Marshal.FreeHGlobal(msg); }
     }
 
     // ------------------------------------------------------- host: the gate

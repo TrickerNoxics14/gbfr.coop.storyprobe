@@ -282,6 +282,7 @@ public partial class Mod
             PumpCutSkip(now);
             PumpReady(now);
             PumpOpenLater(now);
+            PumpAnnounce(now);
         }
         catch (Exception ex) { RelayError("pump", ex); }
         finally { Interlocked.Exchange(ref _pumping, 0); }
