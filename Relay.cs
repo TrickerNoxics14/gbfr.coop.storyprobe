@@ -277,13 +277,14 @@ public partial class Mod
                 var (_, ownsLobby) = LobbyOwnership();
                 _ownsLobbySent = ownsLobby;
                 _votesSent = VoteSupported();
-                Send(RelayCodec.TypeHello, new[] { (byte)((ownsLobby ? RelayCodec.HelloOwnsLobby : 0) | (_votesSent ? RelayCodec.HelloVotes : 0)) });
+                Send(RelayCodec.TypeHello, HelloPayload((byte)((ownsLobby ? RelayCodec.HelloOwnsLobby : 0) | (_votesSent ? RelayCodec.HelloVotes : 0))));
             }
             FlushOutbox(now);
             PumpCutSkip(now);
             PumpReady(now);
             PumpProgress(now);
             PumpSkipVote(now);
+            PumpVersionNotice(now);
             PumpStatus(now);
             PumpOpenLater(now);
             PumpAnnounce(now);
@@ -307,7 +308,7 @@ public partial class Mod
                 ? $"RELAY: on (this PC is {(_isLeader ? "the host" : "a guest")}, player slot {slot})"
                 : "RELAY: off (not in an online session)");
             if (active) _lastHelloSent = -100_000;
-            else { lock (_relayLock) { Array.Clear(_peerSeen); Array.Clear(_peerOwner); _outbox.Clear(); } ForgetOpened(); Array.Clear(_peerVote); Array.Clear(_peerVotes); _voteSince = 0; ClearStatus("1ready", "2progress", "3note", "4skip"); Array.Clear(_peerProgress); _myProgress = default; _mismatchSeen = (0, 0); _progressAck = 0; _loggedMismatch = 0; }
+            else { lock (_relayLock) { Array.Clear(_peerSeen); Array.Clear(_peerOwner); _outbox.Clear(); } ForgetOpened(); ForgetVersions(); Array.Clear(_peerVote); Array.Clear(_peerVotes); _voteSince = 0; ClearStatus("1ready", "2progress", "3note", "4skip"); Array.Clear(_peerProgress); _myProgress = default; _mismatchSeen = (0, 0); _progressAck = 0; _loggedMismatch = 0; }
         }
     }
 
@@ -382,6 +383,7 @@ public partial class Mod
                     _peerSeen[from] = Math.Max(1, now); _peerLeader[from] = f.FromLeader;   // 0 means "never"
                     _peerOwner[from] = p.Length >= 1 && (p[0] & RelayCodec.HelloOwnsLobby) != 0;
                     _peerVotes[from] = p.Length >= 1 && (p[0] & RelayCodec.HelloVotes) != 0;
+                    OnHelloVersion(from, p);
                     if (fresh)
                     {
                         Write($"RELAY: player slot {from} has the mod{(f.FromLeader ? " (host)" : "")}");

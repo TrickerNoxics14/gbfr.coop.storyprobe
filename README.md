@@ -16,6 +16,27 @@ Built and tested against **Endless Ragnarok 2.0.5 and 2.0.6**. On 2.0.6 every pi
 
 The unlock is **on by default** — no config editing needed.
 
+### Updating
+
+From 0.32 the mod updates through **Reloaded-II itself**; the mod has no
+network code of its own. Its `ModConfig.json` tells the launcher where to look
+(this GitHub repository). Every release is a beta, so one thing has to be
+switched on once per PC: in Reloaded-II open the mod's settings and tick
+**Allow Beta Versions** (Edit User Config). After that the launcher checks for a
+newer release when you open it and offers to download and install it.
+
+- The first time (or from a version older than 0.32) install by hand: download
+  `gbfr.coop.storyprobe.zip` from the newest release on the
+  [Releases page](https://github.com/TrickerNoxics14/gbfr.coop.storyprobe/releases)
+  and drag it into Reloaded-II.
+- Both players need the **same version**. Each mod tells the other its version,
+  and if they differ both of you see a note on screen ("Mod versions differ:
+  player slot 2 has v0.31.0, you have v0.32.0. Update so both match.") and a
+  `VERSION` line in the log. Players on a build older than 0.32 are reported
+  as "an older version".
+- Nothing is updated without you: the launcher asks first, and the mod never
+  downloads anything.
+
 ### Both machines need it
 
 | Must match | Why |
@@ -367,6 +388,8 @@ PARTY XX-- (2/4) -> XXXX (4/4)      quest=Chapter 1 (101001) inLobby=1
 - **SKIP VOTE** — a guest voted to skip a cutscene, confirmed twice and skipped
   on this PC only, or the host skipped for everyone because enough players
   voted.
+- **VERSION** — another player's mod version differs from yours (or is
+  older than 0.32); update the older one.
 - **PROGRESS** — your story save differs from another player's (both
   numbers), or the host's start was held because of it and what to do.
   The heartbeat also shows `saves=<cleared>/diff=<players that differ>`.
@@ -406,6 +429,8 @@ What this mod does and does not do, so you don't have to take it on trust:
     two numbers the game itself sends for that press,
   - "I voted to skip this cutscene" (since 0.31, only with `SkipVoteOnline`):
     the quest number, re-sent every second while the vote stands,
+  - which version of the mod this is (since 0.32): three small numbers, so
+    the other player's mod can warn you when the versions differ,
   - how far your save is (since 0.31): the number of story quests it has
     cleared and a short fingerprint of which ones. Nothing else from the save.
 
@@ -530,6 +555,12 @@ the host, when enough votes are in, the same HUD byte (+0x46) is written, which
 is what a guest's relayed skip already did. The cutscene-playing test used by
 the relayed skip now matches the game's own (RVA 0x6461D0: mode 1 or 3; it was
 1 or 5, which could miss a movie played in mode 3).
+
+Since 0.32: the HELLO message carries the mod's version (three bytes after the
+flags byte; older builds read only the first byte and ignore the rest).
+ModConfig.json gained the update settings Reloaded-II reads (the GitHub
+repository, `UseReleaseTag`, and the release file name
+`gbfr.coop.storyprobe.zip`); the mod itself does not use them.
 
 Everything else the mod does is read-only logging. Pointers are validated with
 `VirtualQuery` before being read, so a stale pointer cannot crash the game.

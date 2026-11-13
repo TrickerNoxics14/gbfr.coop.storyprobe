@@ -2,7 +2,7 @@
   "ModId": "gbfr.coop.storyprobe",
   "ModName": "GBFR Story Mode While Online",
   "ModAuthor": "local",
-  "ModVersion": "0.31.0",
+  "ModVersion": "0.32.0",
   "ModDescription": "Allows Chapter Select and Fate Episode to be entered while an online session is active, so story content can be played with a lobby open. Patches 4 bytes of game code at runtime. Both host and guest need the same mod version AND the same game version (2.0.6).",
   "ModDll": "gbfr.coop.storyprobe.dll",
   "ModIcon": "icon.png",
@@ -23,6 +23,12 @@
     "ModConfig\\.json"
   ],
   "PluginData": {
+    "GitHubRelease": {
+      "UserName": "TrickerNoxics14",
+      "RepositoryName": "gbfr.coop.storyprobe",
+      "UseReleaseTag": true,
+      "AssetFileName": "gbfr.coop.storyprobe.zip"
+    },
     "GitHubDependencies": {
       "IdToConfigMap": {
         "Reloaded.Memory.SigScan.ReloadedII": {
@@ -54,5 +60,5 @@
   "SupportedAppId": [
     "granblue_fantasy_relink.exe"
   ],
-  "ProjectUrl": ""
+  "ProjectUrl": "https://github.com/TrickerNoxics14/gbfr.coop.storyprobe"
 }

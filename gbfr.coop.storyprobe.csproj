@@ -5,6 +5,8 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <AssemblyName>gbfr.coop.storyprobe</AssemblyName>
+    <!-- Keep equal to ModVersion in ModConfig.json (the audit checks it): the mod announces this number to the other players. -->
+    <Version>0.32.0</Version>
     <RootNamespace>gbfr.coop.storyprobe</RootNamespace>
     <EnableDynamicLoading>true</EnableDynamicLoading>
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
